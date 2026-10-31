@@ -177,7 +177,7 @@ Policies are additive allow-lists on top of the namespace default deny.
 Evidence from `make down && make up && make verify` (Podman 6.1.4 rootful machine, macOS arm64), trimmed:
 
 ```text
-$ make down && make up        # from scratch: 468 s, of which ~3.5 min are Envoy Gateway image pulls
+$ make down && make up        # from scratch: 376 s (two runs: 376 s and 468 s; mostly Envoy Gateway image pulls)
 Container engine: podman
   ok    podman 6.1.4, rootful, running
   ok    engine resources: 4 CPUs / 9 GiB
@@ -190,7 +190,7 @@ WARNING: gateway ports 80/443 bind to 0.0.0.0 (reachable from the network); see 
 ...
 NAME            NAMESPACE              CHART                                     VERSION   DURATION
 apps-baseline   apps                   ./charts/namespace-baseline               0.1.0           0s
-envoy-gateway   envoy-gateway-system   oci://docker.io/envoyproxy/gateway-helm   v1.9.3       3m20s
+envoy-gateway   envoy-gateway-system   oci://docker.io/envoyproxy/gateway-helm   v1.9.3       1m48s
 edge            envoy-gateway-system   ./charts/edge                             0.1.0           0s
 payment         apps                   ./charts/microservice                     0.1.0           3s
 user            apps                   ./charts/microservice                     0.1.0           3s
@@ -206,7 +206,7 @@ $ make verify
 == 2. Host -> gateway (http://api.localtest.me:80)
   WARN  host DNS does not resolve api.localtest.me; add it to /etc/hosts (see deploy/README.md)
   PASS  POST /orders -> 201
-  PASS  GET /orders/6d88a11d08a7 -> 200
+  PASS  GET /orders/32c2dacf27d2 -> 200
   PASS  GET /users/u-1001 -> 200
   PASS  GET /payments (not exposed) -> 404
   PASS  GET /admin/faults (not exposed) -> 404
@@ -219,7 +219,7 @@ $ make verify
   PASS  POST /payments (not exposed) -> 404
   PASS  PUT /admin/faults (not exposed) -> 404
 == 3. Pod -> gateway via CoreDNS rewrite (namespace netcheck, outside apps)
-  PASS  api.localtest.me resolves in-cluster to the envoy-edge Service -> 10.96.135.172
+  PASS  api.localtest.me resolves in-cluster to the envoy-edge Service -> 10.96.232.202
   PASS  pod: POST http://api.localtest.me/orders -> 201
   PASS  pod: GET http://api.localtest.me/users/u-1001 -> 200
 == 4. NetworkPolicy (default deny in apps)
@@ -228,7 +228,7 @@ $ make verify
   PASS  pod outside apps -> order.apps directly (blocked) -> 000
   PASS  order -> user and order -> payment allowed (POST /orders returned 201 above)
 == 5. Readiness probe: not ready => out of endpoints, not restarted
-  PASS  EndpointSlice user: endpoint ready (after 7 s) -> false
+  PASS  EndpointSlice user: endpoint ready (after 8 s) -> false
   PASS  gateway GET /users/u-1001 while not ready -> 503
   PASS  /livez still healthy -> 200
   PASS  restartCount unchanged after 35 s -> 0
