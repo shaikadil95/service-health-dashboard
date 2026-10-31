@@ -20,6 +20,13 @@ import { StatusBadge } from "@/components/status-badge"
 import type { ServiceStatus, ServicesResponse } from "@/lib/api"
 import { formatMs, formatPercent, formatRps } from "@/lib/format"
 
+// Tailwind sky-500, rose-500 and violet-500.
+const COLORS = {
+  rps: "oklch(68.5% 0.169 237.323)",
+  errors: "oklch(64.5% 0.246 16.439)",
+  latency: "oklch(60.6% 0.25 292.717)",
+}
+
 type MetricProps = {
   label: string
   hint: string
@@ -91,6 +98,7 @@ export function ServiceCard({
               label="Request rate"
               points={series.rps}
               format={formatRps}
+              color={COLORS.rps}
             />
           </Metric>
           <Metric
@@ -103,7 +111,7 @@ export function ServiceCard({
               points={series.error_ratio}
               format={formatPercent}
               threshold={thresholds.error_ratio}
-              color="var(--chart-5)"
+              color={COLORS.errors}
             />
           </Metric>
           <Metric
@@ -116,7 +124,7 @@ export function ServiceCard({
               points={series.latency_p95_ms}
               format={formatMs}
               threshold={thresholds.latency_p95_ms}
-              color="var(--chart-3)"
+              color={COLORS.latency}
             />
           </Metric>
         </dl>

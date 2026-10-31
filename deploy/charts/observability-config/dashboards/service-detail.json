@@ -517,7 +517,10 @@
       ],
       "options": {
         "showTime": true,
-        "wrapLogMessage": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": false,
+        "syntaxHighlighting": false,
         "enableLogDetails": true,
         "sortOrder": "Descending",
         "dedupStrategy": "none",

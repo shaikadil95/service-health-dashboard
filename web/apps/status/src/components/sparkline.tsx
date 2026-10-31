@@ -14,7 +14,8 @@ type SparklineProps = {
   points: Point[]
   format: (value: number | null) => string
   threshold?: number
-  color?: string
+  // Distinct hues per metric: the neutral shadcn preset's --chart-* colours are greys.
+  color: string
 }
 
 export function Sparkline({
@@ -22,7 +23,7 @@ export function Sparkline({
   points,
   format,
   threshold,
-  color = "var(--chart-2)",
+  color,
 }: SparklineProps) {
   const config = { v: { label, color } } satisfies ChartConfig
   const data = points.map((p) => ({ t: p.t * 1000, v: p.v }))
