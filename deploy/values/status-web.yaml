@@ -1,0 +1,75 @@
+# Status page (web/apps/status): static files served by nginx-unprivileged on status.localtest.me.
+# The gateway sends /api on the same host to the Status API (values/status-api.yaml); longer path
+# prefixes win, so "/" here only gets everything else.
+image:
+  repository: localhost/shd/status-web
+
+# nginx, not a Python service: no PORT/FAULT_*/OTEL_* variables, no OTLP export.
+shdRuntime: false
+otel:
+  exporter:
+    enabled: false
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    cpu: 200m
+    memory: 64Mi
+
+# nginx probes answered by nginx.conf itself.
+probes:
+  startup:
+    path: /livez
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 15
+  liveness:
+    path: /livez
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 2
+    successThreshold: 1
+
+# nginx-unprivileged: UID/GID 101, pid file and temp files in /tmp.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 101
+  runAsGroup: 101
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+tmpVolume:
+  enabled: true
+
+shutdown:
+  preStopSleepSeconds: 5
+  drainSeconds: 0
+  timeoutSeconds: 5
+  terminationGracePeriodSeconds: 15
+
+networkPolicy:
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: envoy
+          app.kubernetes.io/component: proxy
+          gateway.envoyproxy.io/owning-gateway-name: edge
+  otelCollector:
+    enabled: false
+  blackboxExporter:
+    enabled: false
+
+httpRoute:
+  enabled: true
+  hostnames: [status.localtest.me]
+  pathPrefixes: [/]

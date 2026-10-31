@@ -68,6 +68,25 @@ releases:
     disableValidationOnInstall: true
     values: [values/order.yaml]
 
+  # Status page (Phase 4): static SPA and its backend for frontend on status.localtest.me. The
+  # Status API reports UNKNOWN while Prometheus or Alertmanager are not there yet, so it does not
+  # wait for the observability releases.
+  - name: status-api
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/apps-baseline]
+    disableValidationOnInstall: true
+    values: [values/status-api.yaml]
+
+  - name: status-web
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/apps-baseline]
+    disableValidationOnInstall: true
+    values: [values/status-web.yaml]
+
   # --- Observability (namespace "observability") -------------------------------------------------
   # Prometheus Operator CRDs as templates of their own chart instead of kube-prometheus-stack's crds/
   # directory: Helm then upgrades them with the chart, and server-side apply avoids the 256 KiB
