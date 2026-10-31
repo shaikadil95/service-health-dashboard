@@ -130,8 +130,30 @@ A k6 load generator sends steady traffic so that there is always something to ob
 | Web frontends | React, TypeScript, Vite, Tailwind and shadcn/ui in a pnpm monorepo under `web/`: `apps/status` (status page, Phase 4), `apps/shop` (customer page, Phase 6) and the shared `packages/ui` (`@workspace/ui`). Built as static assets. | `nginx-unprivileged` Deployment per app | [0006](adr/0006-status-api-bff-and-status-page.md) |
 | k6 | Steady, low background traffic for the demo | Job or Deployment | — |
 | Envoy Gateway | Gateway API implementation. Host-based routing on `*.localtest.me`, TLS, and OIDC and JWT authentication from Phase 6. | Deployment and managed Envoy proxy | [0008](adr/0008-envoy-gateway-as-edge.md) |
-| Keycloak (Phase 6) | Identity provider at `sso.localtest.me`. A `customers` realm for the shop and API, and an `ops` realm for operations UIs. | Deployment and PostgreSQL | [0009](adr/0009-keycloak-and-sso.md) |
+| Keycloak (Phase 6) | Identity provider at `sso.localtest.me`. A `customers` realm for the shop and API, and an `ops` realm for operations UIs. | Official **Keycloak Operator** (`Keycloak` and `KeycloakRealmImport` CRs) with a plain PostgreSQL StatefulSet (official image, PVC) | [0009](adr/0009-keycloak-and-sso.md) |
 | kind on Podman or Docker | Local Kubernetes runtime | Containers on the host | [0010](adr/0010-local-runtime-kind.md) |
+
+### Custom resources (CRDs)
+
+The design uses **only vendor CRDs** and defines **none of its own**. This keeps the API surface small and puts upgrades in upstream hands.
+
+| Provider | CRDs used | From phase |
+|---|---|---|
+| Gateway API (upstream, installed with Envoy Gateway) | `GatewayClass`, `Gateway`, `HTTPRoute` | 2 |
+| Envoy Gateway | `EnvoyProxy` (proxy telemetry and NodePorts), `SecurityPolicy` (OIDC and JWT) | 2, 6 |
+| Prometheus Operator (kube-prometheus-stack) | `Prometheus`, `Alertmanager`, `ServiceMonitor`, `PodMonitor`, `Probe`, `PrometheusRule`, `AlertmanagerConfig` | 3, 5 |
+| cert-manager | `ClusterIssuer`, `Certificate` | 6 |
+| Keycloak Operator | `Keycloak`, `KeycloakRealmImport` | 6 |
+
+**Not used on purpose:**
+- **OpenTelemetry Operator.** We do not use auto-instrumentation injection, because the services instrument themselves with the SDK. One Collector
+  DaemonSet is easier to manage with the Helm chart than through `OpenTelemetryCollector` resources and the operator's admission webhooks.
+- **Grafana Operator.** kube-prometheus-stack's Grafana sidecar already provisions datasources and dashboards from labelled ConfigMaps, which is enough for dashboards as code.
+
+**CRD lifecycle.** Helm installs CRDs from a chart's `crds/` directory on the first install only. It [never upgrades or deletes them][helm-crds].
+helmfile therefore installs the CRDs first, as separate releases ordered with `needs:`, before the releases that use them. The large
+Prometheus Operator CRDs are applied with **server-side apply**, because client-side `kubectl apply` would exceed the 256 KiB limit on the
+`last-applied-configuration` annotation.
 
 ## 4. Main data flows
 
@@ -507,7 +529,9 @@ sequenceDiagram
 
 Status: **Proposed** ([ADR 0009](adr/0009-keycloak-and-sso.md)). The design:
 
-- **Keycloak** with PostgreSQL at `sso.localtest.me`. Realms, clients and roles are kept as code (realm import JSON).
+- **Keycloak** is deployed with the official **Keycloak Operator**. A `Keycloak` resource defines the server, and `KeycloakRealmImport` resources keep realms, clients,
+  roles and groups as code. It uses a plain **PostgreSQL StatefulSet** (official `postgres` image, PVC) and is served at `sso.localtest.me`.
+  The Bitnami chart is not used. See [ADR 0009](adr/0009-keycloak-and-sso.md).
   - **`customers` realm:** self-registration, a public client `customer-web` (authorization code flow with PKCE), API audience `shop-api`, and roles `orders:read` and `orders:write`.
   - **`ops` realm:** groups `sre`, `dev` and `viewer`, with SSO across every monitoring UI.
 - **Ops UIs.** Grafana uses its **native Keycloak OAuth** and maps groups to Admin, Editor or Viewer with `role_attribute_path`. The gateway only routes it.
@@ -589,13 +613,15 @@ Official documentation used for the claims in this document:
   [Envoy Gateway JWT](https://gateway.envoyproxy.io/docs/tasks/security/jwt-authentication/) ·
   [CoreDNS rewrite plugin](https://coredns.io/plugins/rewrite/) ·
   [Keycloak documentation](https://www.keycloak.org/documentation) ·
+  [Keycloak Operator](https://www.keycloak.org/operator/installation) ·
+  [Keycloak realm import](https://www.keycloak.org/operator/realm-import) ·
   [OAuth 2.0 for Browser-Based Apps][oauth-bba] ·
   [mkcert](https://github.com/FiloSottile/mkcert) · [cert-manager](https://cert-manager.io/docs/)
 - Frontend: [shadcn/ui with Vite (including monorepo)][shadcn-vite]
 - Runtime: [kind quick start (incl. Podman provider)](https://kind.sigs.k8s.io/docs/user/quick-start/) ·
   [kind configuration (extraPortMappings)](https://kind.sigs.k8s.io/docs/user/configuration/#extra-port-mappings) ·
   [kind v0.24.0 release (NetworkPolicy in kindnet)][kind-v024] ·
-  [Helm](https://helm.sh/docs/) · [helmfile](https://helmfile.readthedocs.io/) · [helm-diff](https://github.com/databus23/helm-diff) ·
+  [Helm](https://helm.sh/docs/) · [Helm and CRDs][helm-crds] · [helmfile](https://helmfile.readthedocs.io/) · [helm-diff](https://github.com/databus23/helm-diff) ·
   [Mailpit](https://mailpit.axllent.org/) · [k6](https://grafana.com/docs/k6/latest/)
 - SRE practice: [Monitoring distributed systems (four golden signals)][sre-monitoring] ·
   [Alerting on SLOs (multi-window, multi-burn-rate)][sre-slo-alerting] ·
@@ -608,3 +634,4 @@ Official documentation used for the claims in this document:
 [shadcn-vite]: https://ui.shadcn.com/docs/installation/vite
 [oauth-bba]: https://datatracker.ietf.org/doc/draft-ietf-oauth-browser-based-apps/
 [kind-v024]: https://github.com/kubernetes-sigs/kind/releases/tag/v0.24.0
+[helm-crds]: https://helm.sh/docs/chart_best_practices/custom_resource_definitions/

@@ -85,7 +85,7 @@ The [architecture document](docs/architecture.md) explains each flow.
 | Status view | Status API (FastAPI backend for frontend) and a status page in React, TypeScript, Vite, Tailwind and shadcn/ui | [0006](docs/adr/0006-status-api-bff-and-status-page.md) |
 | Alerting | Prometheus rules → Alertmanager → email (Mailpit) | [0007](docs/adr/0007-alertmanager-routing-and-mailpit.md) |
 | Edge | Envoy Gateway (Kubernetes Gateway API) on `*.localtest.me` | [0008](docs/adr/0008-envoy-gateway-as-edge.md) |
-| Identity (Phase 6) | Keycloak (`customers` and `ops` realms), Envoy Gateway OIDC and JWT | [0009](docs/adr/0009-keycloak-and-sso.md) |
+| Identity (Phase 6) | Keycloak through the Keycloak Operator (`customers` and `ops` realms), Envoy Gateway OIDC and JWT | [0009](docs/adr/0009-keycloak-and-sso.md) |
 | Runtime and deployment | kind on Docker or Podman, Helm 4, helmfile, Makefile | [0010](docs/adr/0010-local-runtime-kind.md) |
 | Load | k6 | — |
 
