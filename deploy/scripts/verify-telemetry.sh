@@ -181,10 +181,13 @@ for ds in prometheus loki tempo; do
 done
 
 echo "== 5. Loki logs and Tempo traces (through Grafana's datasource proxy)"
-loki_line() { # <service> -> "<trace_id> <message>" of a recent line with a trace_id
+loki_line() { # <service> [<filter>] [<min age s>] -> "<trace_id> <severity> <message>" of a recent line
+  local now
+  now=$(date +%s)
   gf -G "$(url grafana.localtest.me /api/datasources/proxy/uid/loki/loki/api/v1/query_range)" \
     --data-urlencode "query={service_name=\"$1\", k8s_namespace_name=\"apps\"} | trace_id != \"\" ${2:-}" \
-    --data-urlencode "since=10m" --data-urlencode "limit=1" |
+    --data-urlencode "start=$((now - 600))000000000" --data-urlencode "end=$((now - ${3:-0}))000000000" \
+    --data-urlencode "limit=1" |
     python3 -c '
 import json, sys
 r = json.load(sys.stdin)["data"]["result"]
@@ -216,7 +219,9 @@ sys.exit(0 if need <= edges else 1)'
 }
 order_trace() {
   local id
-  id=$(loki_line order '| http_route="/orders" | http_request_method="POST"' | cut -d' ' -f1) || return 1
+  # A line at least 30 s old: by then every service has exported its spans (batching) and Tempo
+  # returns the complete trace.
+  id=$(loki_line order '| http_route="/orders" | http_request_method="POST"' 30 | cut -d' ' -f1) || return 1
   echo -n "trace_id $id from Loki: "
   trace_spans "$id"
 }
