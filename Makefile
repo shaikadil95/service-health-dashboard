@@ -252,6 +252,7 @@ status: ## Show nodes, gateway, routes and workloads
 	@echo; echo "API: http://api.localtest.me/orders  (POST/GET), http://api.localtest.me/users/u-1001"
 	@echo "Status page: http://status.localtest.me (API: http://status.localtest.me/api/v1/services)"
 	@echo "UIs: http://grafana.localtest.me (admin, password: make grafana-password), http://prometheus.localtest.me, http://alertmanager.localtest.me"
+	@echo "On-call inbox: http://mail.localtest.me (Mailpit); failure scenarios: make demo"
 
 .PHONY: grafana-password
 grafana-password: ## Print the generated Grafana admin password (user: admin)
@@ -267,14 +268,23 @@ load-stop: ## Stop the k6 load generator
 	$(KUBECTL_KIND) -n loadgen scale deployment/loadgen --replicas=0
 
 .PHONY: verify
-verify: verify-image ## Automated platform (2), telemetry (3) and visualization (4) checks against the running cluster
+verify: verify-image ## Automated platform (2), telemetry (3), visualization (4) and alerting (5) checks against the running cluster
 	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify.sh
 	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) deploy/scripts/verify-telemetry.sh
 	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify-status.sh
+	$(SCRIPT_ENV) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify-alerting.sh
+
+.PHONY: demo
+demo: ## Failure scenarios a-d: alerts, emails in Mailpit, inhibition, recovery (scripts/demo.sh all, ~25 min)
+	KUBECTL="$(KUBECTL_KIND)" scripts/demo.sh all
+
+.PHONY: demo-reset
+demo-reset: ## Reset fault injection and scale the services back to 1
+	KUBECTL="$(KUBECTL_KIND)" scripts/demo.sh reset
 
 .PHONY: lint-charts
 lint-charts: ## helm lint and render the local charts with every values file
-	helm lint --strict deploy/charts/edge deploy/charts/namespace-baseline deploy/charts/observability-config loadgen
+	helm lint --strict deploy/charts/edge deploy/charts/namespace-baseline deploy/charts/observability-config deploy/charts/alerting loadgen
 	@for svc in user order payment status-api status-web; do \
 	  helm lint --strict deploy/charts/microservice -f deploy/values/$$svc.yaml && \
 	  helm template $$svc deploy/charts/microservice -n apps -f deploy/values/$$svc.yaml > /dev/null || exit 1; \
