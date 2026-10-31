@@ -77,14 +77,16 @@ config:
       include: [/var/log/pods/apps_*/*/*.log]
       exclude: []
       start_at: end
-      # The path adds nothing that the k8s.* resource attributes do not already say.
-      include_file_path: false
       operators:
         # CRI log format -> body, stream, time; resource attributes k8s.namespace.name,
         # k8s.pod.name, k8s.pod.uid, k8s.container.name, k8s.container.restart_count.
         - type: container
           id: container-parser
           max_log_size: 102400
+        # The container parser needs log.file.path (include_file_path, set by the preset) to derive
+        # the k8s.* attributes; afterwards the path adds nothing and is dropped.
+        - type: remove
+          field: attributes["log.file.path"]
         # The services log one JSON object per line (services/telemetry-lib/.../logs.py):
         # {"timestamp", "level", "logger", "message", "service.name", "trace_id", "span_id", ...}.
         # Map them to the OTel log data model instead of leaving them as text: timestamp,
