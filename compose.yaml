@@ -1,0 +1,69 @@
+# Local run of the three services plus an OpenTelemetry Collector that prints all telemetry.
+# Works with `docker compose` and `podman compose`. See services/README.md.
+name: service-health-dashboard
+
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+  OTEL_METRIC_EXPORT_INTERVAL: "10000"
+  # No filelog receiver in compose, so logs are also exported over OTLP here.
+  OTEL_LOGS_EXPORTER: otlp
+  OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=compose
+  SHUTDOWN_DRAIN_SECONDS: "2"
+
+x-service: &service
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 20s
+  mem_limit: 256m
+  depends_on:
+    otel-collector:
+      condition: service_started
+
+services:
+  user-service:
+    <<: *service
+    image: localhost/shd/user-service:dev
+    build:
+      context: .
+      dockerfile: services/Dockerfile
+      args: { SERVICE: user-service }
+    environment:
+      <<: *otel-env
+    ports: ["127.0.0.1:8081:8080"]
+
+  payment-service:
+    <<: *service
+    image: localhost/shd/payment-service:dev
+    build:
+      context: .
+      dockerfile: services/Dockerfile
+      args: { SERVICE: payment-service }
+    environment:
+      <<: *otel-env
+    ports: ["127.0.0.1:8083:8080"]
+
+  order-service:
+    <<: *service
+    image: localhost/shd/order-service:dev
+    build:
+      context: .
+      dockerfile: services/Dockerfile
+      args: { SERVICE: order-service }
+    environment:
+      <<: *otel-env
+      USER_SERVICE_URL: http://user-service:8080
+      PAYMENT_SERVICE_URL: http://payment-service:8080
+    ports: ["127.0.0.1:8082:8080"]
+
+  otel-collector:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.164.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./deploy/compose/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    mem_limit: 256m
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:13133:13133"
