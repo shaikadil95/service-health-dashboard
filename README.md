@@ -128,11 +128,23 @@ From Phase 6, every URL uses HTTPS.
 - [kubectl](https://kubernetes.io/docs/tasks/tools/), within the supported version skew of the kind node image
 - [Helm](https://helm.sh/) **4**
 - [helmfile](https://helmfile.readthedocs.io/) and the [helm-diff](https://github.com/databus23/helm-diff) plugin
+- Phase 1 local run: [uv](https://docs.astral.sh/uv/) and a compose provider (`docker compose`, or `podman compose` with `docker-compose` installed)
 - Later phases: [k6](https://grafana.com/docs/k6/latest/) (Phase 3), [pnpm](https://pnpm.io/) and Node.js for frontend development (Phase 4), [mkcert](https://github.com/FiloSottile/mkcert) (Phase 6)
 
 ## Getting started
 
-**Coming in Phase 2.** The planned flow is `make up` to create the cluster and deploy everything, `scripts/demo.sh` to run the failure scenarios, and `make down` to remove it all.
+**Phase 1 (available now):** run the three instrumented services and an OpenTelemetry Collector locally, without Kubernetes:
+
+```bash
+make lint test      # ruff and pytest
+make compose-up     # build the images and start the services plus the Collector (debug exporter)
+make smoke          # end-to-end check, including one distributed trace across order, user and payment
+make compose-down
+```
+
+See [services/README.md](services/README.md) for endpoints, probes, fault injection and telemetry details.
+
+**Kubernetes: coming in Phase 2.** The planned flow is `make up` to create the cluster and deploy everything, `scripts/demo.sh` to run the failure scenarios, and `make down` to remove it all.
 
 ## Contributing
 
