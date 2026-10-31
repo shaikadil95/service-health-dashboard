@@ -218,3 +218,44 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- service-health-dashboard additions ---
+# Kubernetes / kind
+kubeconfig
+*.kubeconfig
+.kube/
+kind-config.local.yaml
+
+# Secrets and local env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+certs/
+
+# mkcert output (e.g. _wildcard.localtest.me+1.pem)
+_wildcard.*
+*-key.pem
+
+# Helm / helmfile caches
+charts/*.tgz
+**/charts/*.tgz
+.helmfile/
+helmfile.lock.local
+
+# Node / frontend (web/ pnpm monorepo, Phase 4+)
+node_modules/
+.pnpm-store/
+.turbo/
+web/**/dist/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
