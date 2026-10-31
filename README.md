@@ -10,7 +10,11 @@ A **lightweight observability solution** for three backend services (User, Order
 It is an architecture exercise that focuses on **design decisions and trade-offs**. It is also a demo you can reproduce on a laptop:
 `make up` → break a service → see red status → receive an email.
 
-> **Status: Phase 2 (local Kubernetes platform).** The design, the three instrumented services and the kind platform with Envoy Gateway are in place. The telemetry stack arrives in Phase 3. See the [roadmap](docs/roadmap.md).
+> **Status: Phase 4 (visualization and Status API).** The design, the three instrumented services, the kind platform, the telemetry pipeline,
+> Grafana with linked signals and two dashboards, the Status API and the status page are in place. Alert rules and email arrive in Phase 5.
+> See the [roadmap](docs/roadmap.md).
+
+![Status page during an injected latency fault](docs/screenshots/status-page.png)
 
 ## Documentation
 
@@ -20,8 +24,9 @@ It is an architecture exercise that focuses on **design decisions and trade-offs
 | [Architecture Decision Records](docs/adr/README.md) | One MADR document for each key decision (ADRs 0001–0010) |
 | [Diagrams](docs/diagrams/) | Mermaid sources (`.mmd`) and rendered SVG files |
 | [Roadmap](docs/roadmap.md) | Phases 0–7 with scope and exit criteria |
-| [Services](services/README.md) | Phase 1: endpoints, probes, fault injection, telemetry |
-| [Local platform](deploy/README.md) | Phase 2: kind, Envoy Gateway, Helm chart, NetworkPolicies, CoreDNS, troubleshooting. Phase 3: telemetry pipeline and storage (Collector, Prometheus, Loki, Tempo, Grafana, blackbox, k6) |
+| [Services](services/README.md) | Phase 1: endpoints, probes, fault injection, telemetry. Phase 4: the [Status API contract](services/README.md#status-api) |
+| [Web](web/README.md) | Phase 4: pnpm monorepo with the shadcn/ui status page |
+| [Local platform](deploy/README.md) | Phase 2: kind, Envoy Gateway, Helm chart, NetworkPolicies, CoreDNS, troubleshooting. Phase 3: telemetry pipeline and storage (Collector, Prometheus, Loki, Tempo, Grafana, blackbox, k6). Phase 4: Grafana correlations and dashboards, status page routing, evidence |
 | [CI/CD placeholder](.github/workflows/README.md) | Planned CI and GitOps CD |
 
 ## Architecture overview
@@ -116,7 +121,8 @@ These are available **from Phase 2 onwards**. Each URL appears in the phase that
 | http://grafana.localtest.me | Grafana | 3 |
 | http://prometheus.localtest.me | Prometheus | 3 |
 | http://alertmanager.localtest.me | Alertmanager | 3 |
-| http://status.localtest.me | Status page and Status API (`/api`) | 4 |
+| http://status.localtest.me | Status page; Status API on `/api` (e.g. `/api/v1/services`) | 4 |
+| http://grafana.localtest.me/d/shd-overview | Grafana: Service Health Overview (and Service Detail) | 4 |
 | http://mail.localtest.me | Mailpit (on-call inbox) | 5 |
 | https://sso.localtest.me | Keycloak | 6 |
 | https://shop.localtest.me | Customer shop page | 6 |
@@ -132,13 +138,14 @@ From Phase 6, every URL uses HTTPS.
 - [helmfile](https://helmfile.readthedocs.io/) and the [helm-diff](https://github.com/databus23/helm-diff) plugin
 - Phase 1 local run: [uv](https://docs.astral.sh/uv/) and a compose provider (`docker compose`, or `podman compose` with `docker-compose` installed)
 - Optional: [k6](https://grafana.com/docs/k6/latest/) to run `loadgen/scripts/orders.js` from the host (Phase 3 runs it in the cluster)
-- Later phases: [pnpm](https://pnpm.io/) and Node.js for frontend development (Phase 4), [mkcert](https://github.com/FiloSottile/mkcert) (Phase 6)
+- Frontend development only (Phase 4, `make web-check`): Node.js ≥ 20.19 and [pnpm](https://pnpm.io/) 12. The images build without them.
+- Later phases: [mkcert](https://github.com/FiloSottile/mkcert) (Phase 6)
 
 ## Getting started
 
-**Kubernetes (Phases 2–3):** one command creates a kind cluster, installs Envoy Gateway, the observability stack
-(OTel Collector, Prometheus, Alertmanager, Grafana, Loki, Tempo, blackbox exporter) and the three services, and
-starts a k6 load generator:
+**Kubernetes (Phases 2–4):** one command creates a kind cluster, installs Envoy Gateway, the observability stack
+(OTel Collector, Prometheus, Alertmanager, Grafana with its dashboards, Loki, Tempo, blackbox exporter), the three services,
+the Status API and the status page, and starts a k6 load generator:
 
 ```bash
 make prereqs        # container engine (Podman must be rootful), kind, kubectl, helm 4, helmfile, helm-diff
@@ -146,7 +153,8 @@ make up             # kind cluster + images + helmfile apply + CoreDNS rewrite (
 curl -s -X POST http://api.localtest.me/orders -H 'content-type: application/json' \
   -d '{"user_id":"u-1001","items":[{"sku":"book","quantity":2,"unit_price":"12.50"}],"currency":"EUR"}'
 curl -s http://api.localtest.me/users/u-1001
-make verify         # automated checks: routes, NetworkPolicy, readiness, then metrics/logs/traces end to end
+open http://status.localtest.me   # status page; curl http://status.localtest.me/api/v1/services for the JSON
+make verify         # automated checks: routes, NetworkPolicy, readiness, metrics/logs/traces, dashboards, status page
 make grafana-password  # http://grafana.localtest.me, user admin
 make load-stop      # or load-start: the k6 background traffic
 make down

@@ -1,14 +1,15 @@
-# Local Kubernetes platform (Phases 2–3)
+# Local Kubernetes platform (Phases 2–4)
 
 One command creates a single-node [kind](https://kind.sigs.k8s.io/) cluster on Docker or Podman, installs
 [Envoy Gateway](https://gateway.envoyproxy.io/) as the edge, deploys the User, Order and Payment services with
 probes, hardened pods and default-deny NetworkPolicies (Phase 2), and the telemetry pipeline and storage: OpenTelemetry
 Collector, Prometheus, Alertmanager, Grafana, Loki, Tempo, a blackbox exporter and a k6 load generator (Phase 3,
-[details](#telemetry-pipeline-and-storage-phase-3)).
+[details](#telemetry-pipeline-and-storage-phase-3)), then Grafana's linked signals and two dashboards, the Status API and the
+status page on http://status.localtest.me (Phase 4, [details](#visualization-and-status-page-phase-4)).
 
 ```bash
 make up       # prereqs -> kind cluster -> images (services + stack) -> helmfile apply -> CoreDNS rewrite -> status
-make verify   # automated checks: gateway, NetworkPolicy, readiness (Phase 2), then metrics, logs, traces, UIs (Phase 3)
+make verify   # automated checks: gateway, NetworkPolicy, readiness (2); metrics, logs, traces, UIs (3); dashboards, links, status page (4)
 make grafana-password   # http://grafana.localtest.me, user admin
 make down     # delete the cluster
 ```
@@ -51,6 +52,7 @@ flowchart LR
 | CoreDNS | [`scripts/coredns-localtest.sh`](scripts/coredns-localtest.sh) | `*.localtest.me` → `envoy-edge.envoy-gateway-system.svc.cluster.local` inside the cluster |
 | Observability (Phase 3) | releases in namespace `observability`, see [Telemetry pipeline and storage](#telemetry-pipeline-and-storage-phase-3) | Prometheus Operator CRDs, kube-prometheus-stack, Loki, Tempo, OTel Collector, blackbox exporter, `observability-config` (UI routes, Probes, Envoy PodMonitor) |
 | Load generator (Phase 3) | release `loadgen` in namespace `loadgen`, [`../loadgen`](../loadgen) | k6 Deployment with steady order traffic through the gateway |
+| Status (Phase 4) | releases `status-api`, `status-web` in `apps`, [`charts/microservice`](charts/microservice) + [`values/status-*.yaml`](values) | Status API ([`../services/status-api`](../services/status-api)) on `/api` and the static status page ([`../web`](../web)) on `/` of `status.localtest.me` |
 
 [`helmfile.yaml`](helmfile.yaml) orders the releases with `needs`: Envoy Gateway (with its CRDs) first, then the edge, the
 namespace baseline and the services; the Prometheus Operator CRDs before everything that creates `ServiceMonitor`,
@@ -79,7 +81,7 @@ namespace baseline and the services; the Prometheus Operator CRDs before everyth
 |---|---|
 | `make prereqs` | Engine reachable (Podman must be **rootful**), ≥ 4 CPUs / 8 GiB, kind ≥ 0.33, kubectl within skew of the node image, Helm 4, helm-diff, helmfile |
 | `make cluster-up` / `cluster-down` | Create (idempotent) or delete the kind cluster |
-| `make images` | `make build`, then load the images into kind. Docker: `kind load docker-image`. Podman: `podman save -m` to one archive → `kind load image-archive` |
+| `make images` | `make build` (the four Python images and the `status-web` image from [`../web/Dockerfile`](../web/Dockerfile)), then load them into kind. Docker: `kind load docker-image`. Podman: `podman save -m` to one archive → `kind load image-archive` |
 | `make platform-images` | Renders the releases (`helmfile template`), pulls the third-party images that are not on the node yet with the engine (4 in parallel) and loads them into kind ([`scripts/preload-images.sh`](scripts/preload-images.sh)) |
 | `make deploy` | Namespaces with PSA labels → Grafana admin Secret (once) → `helmfile apply` → wait for `Gateway` `Programmed` → CoreDNS rewrite. Idempotent |
 | `make up` / `make down` | `cluster-up images platform-images deploy status` / `cluster-down` |
@@ -87,8 +89,9 @@ namespace baseline and the services; the Prometheus Operator CRDs before everyth
 | `make load-start` / `load-stop` | Scale the k6 load generator to 1 / 0 replicas |
 | `make redeploy` | Rebuild and reload the images, then `rollout restart` the services (the tag stays `dev`) |
 | `make status` | Nodes, Gateway and HTTPRoutes, Envoy Service, workloads and NetworkPolicies |
-| `make verify` | Loads the `curl` test image into kind, then runs [`scripts/verify.sh`](scripts/verify.sh) and [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh), see [Verification](#verification) |
-| `make lint-charts` | `helm lint --strict` and `helm template` for the local charts (edge, namespace-baseline, observability-config, loadgen, microservice with every values file) |
+| `make verify` | Loads the `curl` test image into kind, then runs [`scripts/verify.sh`](scripts/verify.sh), [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh) and [`scripts/verify-status.sh`](scripts/verify-status.sh), see [Verification](#verification) |
+| `make web-check` / `web-dev` | Web monorepo: Prettier, ESLint, typecheck, Vitest, build / Vite dev server (needs Node and pnpm, see [`../web`](../web/README.md)) |
+| `make lint-charts` | `helm lint --strict` and `helm template` for the local charts (edge, namespace-baseline, observability-config, loadgen, microservice with every values file, including `status-api` and `status-web`) |
 
 The engine is detected as in Phase 1 (Podman if it is running, otherwise Docker; `make ENGINE=docker …` forces one).
 With Podman the Makefile exports `KIND_EXPERIMENTAL_PROVIDER=podman`. Every `kubectl` and `helmfile` call uses the
@@ -174,6 +177,8 @@ Policies are additive allow-lists on top of the namespace default deny.
 | `order` | order | ingress on 8080 from the Envoy pods; egress to user and payment on 8080 |
 | `payment` | payment | ingress on 8080 from order only |
 | all three (Phase 3) | user, order, payment | egress to the OTel Collector agent pods in `observability` on 4317/4318; ingress on 8080 from the blackbox exporter pods (synthetic `/readyz` checks) |
+| `status-api` (Phase 4) | status-api | ingress on 8080 from the Envoy pods; egress to the Prometheus pods on 9090 and the Alertmanager pods in `observability` on 9093, and to the Collector (OTLP) |
+| `status-web` (Phase 4) | status-web | ingress on 8080 from the Envoy pods; no egress besides DNS (static files only) |
 
 - The Envoy pods are selected by namespace (`kubernetes.io/metadata.name: envoy-gateway-system`) **and** their labels
   (`app.kubernetes.io/name: envoy`, `app.kubernetes.io/component: proxy`, `gateway.envoyproxy.io/owning-gateway-name: edge`).
@@ -311,10 +316,61 @@ Collector 70–220 MiB, Tempo 154 MiB, Loki 91 MiB. The node reported 3.3 GiB of
 - **Image preload** (`make platform-images`): not in the plan; added because kubelet pulls of ~15 images one by one
   through the Podman DNS took longer than Helm's timeout.
 
+## Visualization and status page (Phase 4)
+
+```mermaid
+flowchart LR
+  browser(["browser"]) -->|"status.localtest.me /"| web["status-web<br/>nginx, static SPA"]
+  browser -->|"status.localtest.me /api"| api["status-api<br/>FastAPI BFF"]
+  api -->|"/api/v1/query, query_range"| prom[("Prometheus")]
+  api -->|"/api/v2/alerts"| am["Alertmanager"]
+  eng(["engineer"]) -->|"grafana.localtest.me"| graf["Grafana"]
+  graf --> prom & loki[("Loki")] & tempo[("Tempo")]
+```
+
+| URL | What |
+|---|---|
+| http://status.localtest.me | Status page ([`../web/apps/status`](../web/README.md)): UP / DEGRADED / DOWN per service, RPS, 5xx %, p95 with sparklines, active alerts |
+| http://status.localtest.me/api/v1/services | Status API JSON ([contract](../services/README.md#status-api)); also `/api/v1/services/{name}` and `/api/v1/alerts` |
+| http://grafana.localtest.me/d/shd-overview | Service Health Overview |
+| http://grafana.localtest.me/d/shd-service-detail?var-service=payment | Service Detail |
+
+**Routing.** Both releases attach an `HTTPRoute` for `status.localtest.me`: `status-web` with prefix `/`, `status-api` with prefix
+`/api`. Gateway API picks the longest matching prefix, so `/api/...` reaches the API and everything else the page: one origin, no
+CORS, and the API's `/docs`, `/admin/faults` and probes are not reachable from outside (they fall through to the page).
+Both use the generic [`charts/microservice`](charts/microservice); for the nginx image `shdRuntime: false` drops the Python
+service variables (PORT, FAULT_*, OTEL_*), `tmpVolume` mounts an emptyDir on `/tmp` (read-only root filesystem), and the pod
+runs as UID 101. `/livez` and `/readyz` of the page are answered by nginx itself.
+
+**Grafana correlations** ([`values/kube-prometheus-stack.yaml`](values/kube-prometheus-stack.yaml), all provisioned; Grafana expands
+`$VAR` in provisioning files, so its own macros are written `$${...}` / `$$__tags`):
+
+| From → to | How |
+|---|---|
+| Metric → trace | Prometheus datasource `exemplarTraceIdDestinations` (`trace_id` → Tempo). The p95 panels request exemplars; click a dot |
+| Log → trace | Loki derived field of type **label** on `trace_id` (structured metadata, not text in the line) → Tempo ("View trace" in log details) |
+| Trace → logs | Tempo `tracesToLogsV2`, custom query `{service_name="<span's service.name>"} \| trace_id="<trace id>"` |
+| Trace → metrics | Tempo `tracesToMetrics`: request rate, 5xx ratio and p95 of the span's service |
+| Service map / node graph | Tempo `serviceMap` from Prometheus (`traces_service_graph_*` of the metrics-generator), `nodeGraph.enabled` |
+
+**Dashboards: two, minimal (user decision).** JSON in [`charts/observability-config/dashboards`](charts/observability-config/dashboards),
+one ConfigMap each (label `grafana_dashboard: "1"`), loaded by the Grafana dashboard sidecar; read-only in the UI. Metric names are the
+OTLP translations verified in Prometheus (`http_server_request_duration_seconds_{bucket,count}`, labels `service_name`,
+`http_response_status_code`, `http_route`); `/admin` calls are excluded from RED.
+
+| Dashboard | Panels |
+|---|---|
+| **Service Health Overview** (`shd-overview`, 5 panels) | Status per service (stat: DOWN if `probe_success` = 0, DEGRADED if 5xx ratio > 5% or p95 > 500 ms over 5 m, else UP), request rate, error % (5xx), p95 latency with exemplars and threshold lines, firing alerts (`ALERTS`, critical and warning). Series link to Service Detail |
+| **Service Detail** (`shd-service-detail`, `$service`, 7 panels) | Readiness probe, ready vs desired replicas, restarts (1 h) from kube-state-metrics; requests by status code, 5xx %, p50/p95/p99 with exemplars; Loki logs of the service with "View trace" links. Header links: Overview, traces of the service in Explore |
+
+No Telemetry Pipeline dashboard: its health is covered by alerts in Phase 5; ad-hoc analysis uses Explore and the Drilldown apps.
+
+![Service Health Overview during the fault test: 5xx spike on payment and order, then the User latency breach](../docs/screenshots/grafana-overview.png)
+
 ## Verification
 
-`make verify` runs [`scripts/verify.sh`](scripts/verify.sh) (Phase 2) and [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh)
-([Phase 3](#phase-3-evidence)) against the running cluster. `verify.sh` checks the Phase 2 exit criteria. It uses
+`make verify` runs [`scripts/verify.sh`](scripts/verify.sh) (Phase 2), [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh)
+([Phase 3](#phase-3-evidence)) and [`scripts/verify-status.sh`](scripts/verify-status.sh) ([Phase 4](#phase-4-evidence)) against the running cluster. `verify.sh` checks the Phase 2 exit criteria. It uses
 `curl --resolve api.localtest.me:80:127.0.0.1` on the host so it does not depend on the host resolver, and a throwaway
 `curl` pod in a `netcheck` namespace (outside `apps`) for the in-cluster checks.
 

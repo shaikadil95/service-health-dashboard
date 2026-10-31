@@ -284,8 +284,9 @@ Details are in [§7](#7-detection-and-alerting-strategy).
 
 - **Engineers use Grafana.** Its datasources are Prometheus (PromQL), Loki (LogQL), Tempo (TraceQL) and Alertmanager, with links
   between them: *exemplars → trace* (Prometheus to Tempo), *trace → logs* by `trace_id` (Tempo to Loki), and
-  *log line → trace* through a derived field (Loki to Tempo). The dashboards are provisioned as code: Service Health Overview,
-  Service Detail (templated by `$service`) and Telemetry Pipeline.
+  *log line → trace* through a derived field (Loki to Tempo), *trace → metrics*, and the service map from Tempo's service-graph
+  metrics. Only two dashboards are provisioned as code, on purpose: Service Health Overview and Service Detail (templated by
+  `$service`). Pipeline health is covered by alerts (Phase 5); anything else is ad hoc in Explore and the Drilldown apps.
 - **Everyone else uses the status page.** It is a React and shadcn/ui single-page app served as static files from
   `status.localtest.me`. It polls the Status API on the same origin (`/api`, so no CORS) every 10 seconds. The Status API queries
   the Prometheus HTTP API (`/api/v1/query`) and the Alertmanager API (`/api/v2/alerts`) and caches results for 10 seconds, so page
@@ -402,30 +403,35 @@ that the status page and any other consumer can use without knowing PromQL.
 |---|---|
 | `probe_success` (blackbox `/readyz`) | Prometheus |
 | `ready_replicas` / `desired_replicas` | Prometheus (kube-state-metrics) |
-| `error_ratio_5m`, `latency_p95_5m`, request rate | Prometheus (OTLP HTTP server metrics) |
-| `firing_alerts` (labels `service`, `severity`) | Alertmanager `/api/v2/alerts` |
+| `error_ratio_5m`, `latency_p95_ms`, `rps` (5-minute windows) and 30-minute sparkline series (1-minute windows) | Prometheus (OTLP `http_server_request_duration_seconds`, `/admin` excluded) |
+| Active alerts (not silenced, not inhibited) for the service: label `service`, or `namespace` plus `deployment`/`container` for generic Kubernetes rules | Alertmanager `/api/v2/alerts` |
 
-**Status rules** (checked in order. The first rule that matches wins. Thresholds are configuration and match the alert thresholds by default):
+**Status rules** (all are evaluated; the worst result wins, in the order of the table. Thresholds are configuration and match the alert thresholds by default):
 
 | Status | Rule |
 |---|---|
 | `DOWN` | The blackbox probe fails (`probe_success == 0`), **or** a `critical` alert is firing for the service |
-| `DEGRADED` | A `warning` alert is firing for the service, **or** a threshold is breached (error ratio > 1%, p95 > 500 ms, or fewer ready replicas than desired) |
+| `DEGRADED` | A `warning` alert is firing for the service, **or** a threshold is breached (5xx ratio > 5% or p95 > 500 ms over 5 minutes, or fewer ready replicas than desired) |
+| `UNKNOWN` | The data to decide is missing: Prometheus unreachable, or no probe result yet |
 | `UP` | None of the above |
 
 The status uses the **same signals and thresholds as alerting**, so the status page and the on-call email never contradict each other.
-If Prometheus cannot be reached, the response says so in `reasons[]` and keeps the last known `updated_at`, rather than silently reporting `UP`.
+If Prometheus cannot be reached, the service is `UNKNOWN` (never a 500 and never a silent `UP`): `reasons[]` says so, `sources.prometheus`
+is `unavailable`, and the last known metrics are kept with their `updated_at`. A `critical` alert still turns the service `DOWN`. If
+Alertmanager cannot be reached, the metric rules still apply and the reason says that alerts were not considered. Alerts with severity
+`none` or `info` (Watchdog, InfoInhibitor) are plumbing and are not returned.
 
 **Endpoints (v1)**
 
 | Method and path | Description |
 |---|---|
-| `GET /api/v1/services` | All services with `status`, `reasons[]`, a metrics snapshot and `updated_at` |
-| `GET /api/v1/services/{name}` | A single service |
-| `GET /api/v1/alerts` | Active alerts with a reduced set of fields (name, service, severity, summary, `startsAt`) |
+| `GET /api/v1/services` | Overall `status`, and per service `status`, `reasons[]`, a metrics snapshot, sparkline `series`, its `alerts`, a Grafana link and `updated_at`; plus `sources`, `thresholds` and `generated_at` |
+| `GET /api/v1/services/{name}` | A single service (404 for an unknown name) |
+| `GET /api/v1/alerts` | Active alerts with a reduced set of fields (`name`, `service`, `severity`, `summary`, `description`, `runbook_url`, `starts_at`) |
 | `GET /livez`, `GET /readyz` | Probes. `/readyz` does **not** fail when Prometheus is down, because the API can still answer and report the problem |
 
-Results are cached on the server for 10 seconds to protect Prometheus.
+Results are cached on the server for 10 seconds (concurrent requests share one refresh) to protect Prometheus; each backend call
+has a 3-second timeout. The full field list is in [services/README.md](../services/README.md#status-api).
 
 Example response:
 
@@ -433,9 +439,12 @@ Example response:
 {
   "name": "payment",
   "status": "DEGRADED",
-  "reasons": ["error_ratio_5m 3.2% > 1%"],
-  "metrics": { "ready_replicas": 2, "desired_replicas": 2, "rps": 4.1, "error_ratio_5m": 0.032, "latency_p95_ms": 180 },
-  "updated_at": "2026-10-31T18:00:00Z"
+  "reasons": ["5xx error ratio 7.8% > 5.0% (5m)"],
+  "metrics": { "probe_success": true, "ready_replicas": 1, "desired_replicas": 1, "rps": 2.0, "error_ratio_5m": 0.0781, "latency_p95_ms": 4.9 },
+  "series": { "rps": [{ "t": 1793485800, "v": 2.0 }], "error_ratio": [ ... ], "latency_p95_ms": [ ... ] },
+  "alerts": [],
+  "links": { "dashboard": "http://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=payment" },
+  "updated_at": "2026-10-31T22:31:15Z"
 }
 ```
 
