@@ -1,0 +1,36 @@
+[project]
+name = "service-health-dashboard"
+version = "0.1.0"
+description = "Workspace root for the Service Health Dashboard services (not a package)."
+requires-python = ">=3.12,<3.13"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.16",  # starlette.testclient transport (plain httpx is deprecated there)
+    "pytest>=9.0",
+    "ruff>=0.17",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["services/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["services/*/src", "services/*/tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "ASYNC", "S", "PT", "RUF"]
+ignore = [
+    "S311", # random is used for fault injection, not cryptography
+]
+
+[tool.ruff.lint.per-file-ignores]
+"services/*/tests/**" = ["S101", "S105", "S106"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --import-mode=importlib"
+testpaths = ["services"]
