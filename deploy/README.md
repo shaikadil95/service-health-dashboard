@@ -1,15 +1,18 @@
-# Local Kubernetes platform (Phases 2–4)
+# Local Kubernetes platform (Phases 2–5)
 
 One command creates a single-node [kind](https://kind.sigs.k8s.io/) cluster on Docker or Podman, installs
 [Envoy Gateway](https://gateway.envoyproxy.io/) as the edge, deploys the User, Order and Payment services with
 probes, hardened pods and default-deny NetworkPolicies (Phase 2), and the telemetry pipeline and storage: OpenTelemetry
 Collector, Prometheus, Alertmanager, Grafana, Loki, Tempo, a blackbox exporter and a k6 load generator (Phase 3,
 [details](#telemetry-pipeline-and-storage-phase-3)), then Grafana's linked signals and two dashboards, the Status API and the
-status page on http://status.localtest.me (Phase 4, [details](#visualization-and-status-page-phase-4)).
+status page on http://status.localtest.me (Phase 4, [details](#visualization-and-status-page-phase-4)), and alerting:
+promtool-tested rules, Alertmanager routing and inhibition, email to Mailpit on http://mail.localtest.me, runbooks and a
+default-deny NetworkPolicy for `observability` (Phase 5, [details](#alerting-and-notification-phase-5)).
 
 ```bash
 make up       # prereqs -> kind cluster -> images (services + stack) -> helmfile apply -> CoreDNS rewrite -> status
-make verify   # automated checks: gateway, NetworkPolicy, readiness (2); metrics, logs, traces, UIs (3); dashboards, links, status page (4)
+make verify   # automated checks: gateway, NetworkPolicy, readiness (2); metrics, logs, traces, UIs (3); dashboards, links, status page (4); rules, Alertmanager, Mailpit (5)
+make demo     # failure scenarios: alert -> email in Mailpit -> status page -> recovery (5)
 make grafana-password   # http://grafana.localtest.me, user admin
 make down     # delete the cluster
 ```
@@ -51,6 +54,7 @@ flowchart LR
 | Namespaces | [`scripts/namespaces.sh`](scripts/namespaces.sh) | Creates `apps` and `envoy-gateway-system` with Pod Security Admission `restricted` (enforce, warn, audit) |
 | CoreDNS | [`scripts/coredns-localtest.sh`](scripts/coredns-localtest.sh) | `*.localtest.me` → `envoy-edge.envoy-gateway-system.svc.cluster.local` inside the cluster |
 | Observability (Phase 3) | releases in namespace `observability`, see [Telemetry pipeline and storage](#telemetry-pipeline-and-storage-phase-3) | Prometheus Operator CRDs, kube-prometheus-stack, Loki, Tempo, OTel Collector, blackbox exporter, `observability-config` (UI routes, Probes, Envoy PodMonitor) |
+| Alerting (Phase 5) | releases `alerting`, `observability-baseline`, see [Alerting](#alerting-and-notification-phase-5) | Alert and recording rules, Alertmanager configuration, Mailpit; default-deny NetworkPolicies for `observability` |
 | Load generator (Phase 3) | release `loadgen` in namespace `loadgen`, [`../loadgen`](../loadgen) | k6 Deployment with steady order traffic through the gateway |
 | Status (Phase 4) | releases `status-api`, `status-web` in `apps`, [`charts/microservice`](charts/microservice) + [`values/status-*.yaml`](values) | Status API ([`../services/status-api`](../services/status-api)) on `/api` and the static status page ([`../web`](../web)) on `/` of `status.localtest.me` |
 
@@ -91,6 +95,8 @@ namespace baseline and the services; the Prometheus Operator CRDs before everyth
 | `make status` | Nodes, Gateway and HTTPRoutes, Envoy Service, workloads and NetworkPolicies |
 | `make verify` | Loads the `curl` test image into kind, then runs [`scripts/verify.sh`](scripts/verify.sh), [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh) and [`scripts/verify-status.sh`](scripts/verify-status.sh), see [Verification](#verification) |
 | `make web-check` / `web-dev` | Web monorepo: Prettier, ESLint, typecheck, Vitest, build / Vite dev server (needs Node and pnpm, see [`../web`](../web/README.md)) |
+| `make rules-lint` / `rules-test` | `promtool check rules`, `amtool check-config` / promtool unit tests and Alertmanager routing and template tests (part of `make lint` / `make test`) |
+| `make demo` / `demo-reset` | The four failure scenarios with recovery ([`../scripts/demo.sh`](../scripts/demo.sh)) / reset all faults |
 | `make lint-charts` | `helm lint --strict` and `helm template` for the local charts (edge, namespace-baseline, observability-config, loadgen, microservice with every values file, including `status-api` and `status-web`) |
 
 The engine is detected as in Phase 1 (Podman if it is running, otherwise Docker; `make ENGINE=docker …` forces one).
@@ -244,7 +250,7 @@ file path, and Envoy spans by the connection's source IP, then adds pod metadata
 | Component | Configuration ([`values/`](values)) | Reached at |
 |---|---|---|
 | Prometheus | `enableOTLPReceiver`; promotes only `service.name`, `k8s.namespace.name`, `k8s.pod.name` to labels (`job`/`instance` come from `service.name`/`service.instance.id`, the rest stays on `target_info`); translation `UnderscoreEscapingWithSuffixes` (→ `http_server_request_duration_seconds_*`); `enableRemoteWriteReceiver`; `exemplar-storage` (100k); `outOfOrderTimeWindow: 30m`; selects every `ServiceMonitor`/`PodMonitor`/`Probe`/`PrometheusRule` in the cluster | http://prometheus.localtest.me |
-| Alertmanager | Chart default configuration (all alerts to the `null` receiver); routing and Mailpit arrive in Phase 5 | http://alertmanager.localtest.me |
+| Alertmanager | Configuration from the Secret `alertmanager-shd` (release `alerting`): routing by severity, inhibition, email to Mailpit, see [Alerting](#alerting-and-notification-phase-5) | http://alertmanager.localtest.me |
 | Grafana | Admin password from the Secret `grafana-admin` that `make deploy` generates once per cluster ([`scripts/grafana-admin-secret.sh`](scripts/grafana-admin-secret.sh)), anonymous access and sign-up off, no PVC, datasources Prometheus (`uid: prometheus`), Loki (`loki`), Tempo (`tempo`), Alertmanager. Correlations and the two dashboards come in Phase 4; the chart's ~25 default dashboards are not installed | http://grafana.localtest.me |
 | Loki | Monolithic, filesystem, `retention_period: 24h` (compactor), `allow_structured_metadata`; index labels only `service.name`, `service.namespace`, `k8s.namespace.name`, `k8s.container.name`, `deployment.environment.name` (Loki's default list would also index `k8s.pod.name` and `service.instance.id`); gateway, memcached caches, canary, ruler and Helm test pod off | in-cluster `loki:3100` |
 | Tempo | Monolithic (Tempo 3: no Kafka), local backend, 24 h block retention, OTLP receivers; metrics-generator with `service-graphs` and `span-metrics`, remote write with exemplars | in-cluster `tempo:3200` (query), `:4317` (OTLP) |
@@ -260,14 +266,14 @@ UIs have no login besides Grafana's own (see the 0.0.0.0 note in [Troubleshootin
 
 Not scraped on kind, so they do not show up as down targets: etcd, kube-controller-manager, kube-scheduler (they bind
 their metrics to 127.0.0.1 in kind) and kube-proxy (`metricsBindAddress` 127.0.0.1:10249); their default rules are off
-too. The other default kube-prometheus-stack rules are loaded; Phase 5 adds the project's alerts and routing.
+too. The other default kube-prometheus-stack rules are loaded (except the `general` group, which the project's own
+`Watchdog` and `TelemetryPipelineDown` replace) and routed by severity like the project's alerts.
 
 **Pod Security.** `observability` enforces `privileged`: the Collector reads `/var/log/pods` and writes offsets through
 hostPath volumes, node-exporter uses the host network and PID namespaces. All other pods there set restricted-style
 security contexts (non-root, no privilege escalation, dropped capabilities, read-only root filesystem where the image
 allows it). The Collector runs as root without capabilities, because the pod log files are root-owned with mode 0640.
-`loadgen` enforces `restricted`. `observability` has no default-deny NetworkPolicy yet: its components talk to the API
-server and the node (kubelet, node-exporter) on host IPs, which kindnet only matches with `ipBlock`s.
+`loadgen` enforces `restricted`. NetworkPolicies of `observability`: see [Alerting](#networkpolicies-observability).
 
 ### Storage
 
@@ -353,6 +359,102 @@ No Telemetry Pipeline dashboard: its health is covered by alerts in Phase 5; ad-
 
 ![Service Health Overview during the fault test: 5xx spike on payment and order, then the User latency breach](../docs/screenshots/grafana-overview.png)
 
+## Alerting and notification (Phase 5)
+
+```mermaid
+flowchart LR
+  prom[("Prometheus<br/>rules every 30 s")] -->|firing / resolved| am["Alertmanager<br/>group, inhibit, route"]
+  am -->|"severity=critical"| oncall(["oncall@ inbox"])
+  am -->|"severity=warning"| team(["team@ inbox"])
+  am -->|"Watchdog"| hb["heartbeat (no-op locally)"]
+  oncall & team --> mailpit["Mailpit<br/>mail.localtest.me"]
+  sapi["Status API"] -->|"/api/v2/alerts"| am
+```
+
+Release `alerting` ([`charts/alerting`](charts/alerting)) holds everything that decides *when* and *whom* to notify:
+
+| Part | Where | What |
+|---|---|---|
+| Rules | [`rules/*.rules.yaml`](charts/alerting/rules) | Plain Prometheus rule files, wrapped unchanged in one `PrometheusRule` each. Recording rules per `service`: request rate, 5xx rate and ratio (5 m, 1 h), p95 latency |
+| Unit tests | [`tests/*.test.yaml`](charts/alerting/tests) | `promtool test rules`: every alert fires for the faulty input and stays silent for healthy, flapping or out-of-scope input (e.g. `/admin` 500s, 401s) |
+| Alertmanager | [`alertmanager/alertmanager.yaml`](charts/alerting/alertmanager/alertmanager.yaml), [`email.tmpl`](charts/alerting/alertmanager/email.tmpl) | Rendered into the Secret `alertmanager-shd`, which kube-prometheus-stack uses through `alertmanagerSpec.configSecret`; tested with `amtool` ([`tests/alertmanager.test.sh`](charts/alerting/tests/alertmanager.test.sh): config, routing per alert, template rendering) |
+| Mailpit | [`templates/mailpit.yaml`](charts/alerting/templates/mailpit.yaml) | `axllent/mailpit` v1.33.0, SMTP on 1025, UI and API on 8025 (`mail.localtest.me`; the send API `/api/v1/send` is blocked at the edge), last 500 messages, no PVC, metrics scraped |
+
+**Rules** (thresholds match the Status API, so the page and the email agree; runbooks in [`../docs/runbooks`](../docs/runbooks/README.md)):
+
+| Alert | Expression (simplified) | `for` | Severity |
+|---|---|---|---|
+| `ServiceDown` | `min by (namespace, service) (probe_success{job="blackbox-readyz"}) == 0` | 1m | critical |
+| `HighErrorRate` | `service:http_server_errors:ratio_rate5m > 0.05` (5xx only, `/admin` excluded) | 5m | critical |
+| `HighLatencyP95` | `service:http_server_request_duration_seconds:p95_rate5m > 0.5` | 5m | warning |
+| `HighLatencyP95` | same for `service="payment"` `> 1` | 5m | critical |
+| `ErrorBudgetBurn` | order 5xx ratio over 1 h **and** 5 m `> 14.4 × 0.5 %` (SLO 99.5 %) | 2m | critical |
+| `PodNotReady` | `kube_pod_status_ready{namespace="apps", condition="false"} == 1`, `service` from `kube_pod_labels` | 2m | warning |
+| `PodCrashLooping` | `CrashLoopBackOff` in the last 5 m (`kube_pod_container_status_waiting_reason`) | 5m | warning |
+| `TelemetryPipelineDown` | Collector, Loki, Tempo or blackbox target down; no Collector at all; Collector exporter failures (`reason` label) | 5–10m | warning |
+| `Watchdog` | `vector(1)` | – | none |
+
+Every alert has the labels `severity` and `service` and the annotations `summary`, `description`, `runbook_url` (GitHub)
+and `dashboard_url` (Service Detail or Overview). The `service` label comes from the blackbox `Probe` (`ServiceDown`), from
+the OTLP resource attribute `service.name` (`label_replace` of `service_name`) or from the pod label
+`app.kubernetes.io/name`, which kube-state-metrics exports (`metricLabelsAllowlist: pods=[app.kubernetes.io/name]`).
+
+**Routing.** `group_by: [alertname, service]`; `critical` → `oncall-email` (group_wait 30s, group_interval 5m,
+repeat 4h), `warning` → `team-email` (1m, 10m, 24h), `Watchdog` → `heartbeat` every minute (a no-op receiver locally; in
+production an external dead man's switch), `info`/`none` → `null`, anything else → `team-email`. `send_resolved: true`.
+The email (HTML and text) lists each alert with summary, description, labels, start/end and links to the runbook, the
+dashboard, the Prometheus query, the Alertmanager view and a pre-filled silence.
+
+**Inhibition.** `ServiceDown` mutes `HighErrorRate`, `HighLatencyP95` and `ErrorBudgetBurn` with the same `service`; the
+critical payment latency alert mutes its warning; `PodNotReady`/`PodCrashLooping` mute kube-prometheus-stack's slower
+`KubePodNotReady`/`KubePodCrashLooping` for the same pod; `KeycloakDown` mutes `LoginFailureSpike` and `TokenLatencyHigh`.
+
+**Checks.** `make lint` runs `promtool check rules` and `amtool check-config`; `make test` runs the promtool unit tests and
+the Alertmanager routing tests (`make rules-test`). Both use the Prometheus and Alertmanager images of the deployed
+versions through the container engine, so nothing has to be installed.
+
+### Failure scenarios (`scripts/demo.sh`)
+
+```bash
+make demo            # scripts/demo.sh all: a -> c -> b -> d, then recovery and RESOLVED emails (~25 min)
+scripts/demo.sh a    # one scenario (a|b|c|d) with reset; NO_RESOLVE=1 skips waiting for the RESOLVED email
+scripts/demo.sh status
+make demo-reset      # reset fault injection, scale everything back to 1
+```
+
+| Scenario | Fault | Expected |
+|---|---|---|
+| a | payment `error_rate=0.3` | payment `DEGRADED`, then `DOWN`; `HighErrorRate` (critical) email to on-call |
+| c | payment scaled to 0 (right after a) | `ServiceDown` (critical) email; payment's still active `HighErrorRate` is **suppressed** by the inhibition rule |
+| b | user `latency_ms=800` | user `DEGRADED`; `HighLatencyP95` (warning) email to the team |
+| d | order `ready=false` | `PodNotReady` (warning) email to the team (and `ServiceDown`: its only pod gets no traffic); the pod is not restarted |
+
+Each step polls the Alertmanager API, Mailpit's API (subject, recipient, runbook and dashboard links) and the Status API.
+The script reaches them, and the services' `/admin/faults`, through `kubectl port-forward`, so it does not depend on the
+gateway or on single sign-on. After the reset it waits until every alert has resolved and its `RESOLVED` email arrived.
+
+### NetworkPolicies (`observability`)
+
+Release `observability-baseline` (chart `namespace-baseline`, [`values/observability-baseline.yaml`](values/observability-baseline.yaml))
+is installed before any other release of the namespace: `default-deny-all`, DNS, and one allow-list per flow. The
+components come from third-party charts that render no policies, so the flows are listed in one place:
+
+| Policy | Allows |
+|---|---|
+| `allow-kube-apiserver-egress` | every pod → API server (6443/443; operator, sidecars, kube-state-metrics, Collector `k8s_attributes`, admission Jobs) |
+| `allow-operator-webhook` | API server → Prometheus Operator admission webhook (10250) |
+| `allow-prometheus-egress` / `allow-prometheus-scrape` | Prometheus → pods in every namespace and the node (kubelet 10250, node-exporter 9100); Prometheus → every pod here |
+| `allow-prometheus-ingress` | Grafana, Collector (OTLP push), Tempo (remote write), Status API (`apps`), Envoy (UI) → 9090 |
+| `allow-alertmanager-*` | Prometheus, Grafana, Status API, Envoy → 9093; Alertmanager → Mailpit 1025; gossip with itself |
+| `allow-mailpit-ingress` | Alertmanager → 1025, Envoy → 8025 |
+| `allow-grafana-*` | Envoy → 3000; Grafana → Prometheus, Loki, Tempo, Alertmanager, and HTTPS to public addresses (plugin installs from grafana.com at startup) |
+| `allow-collector-*`, `allow-loki-*`, `allow-tempo-*` | `apps`, the Envoy proxies and Keycloak → Collector 4317/4318; Collector → Prometheus, Tempo, Loki; Grafana → Loki, Tempo; Tempo → Prometheus |
+| `allow-blackbox-egress` | blackbox exporter → `apps` pods on 8080 |
+
+node-exporter uses the host network and kubelet probes come from the node, so NetworkPolicy does not apply to them. The
+API server and the kubelet have node IPs (not pods); their rules allow the port to any address rather than guessing the
+node network of the container engine.
+
 ## Verification
 
 `make verify` runs the automated checks against the running cluster, one script per phase:
@@ -362,6 +464,7 @@ No Telemetry Pipeline dashboard: its health is covered by alerts in Phase 5; ad-
 | [`scripts/verify.sh`](scripts/verify.sh) | Phase 2: gateway and routes from the host (`curl --resolve`, so the host resolver does not matter) and from a throwaway pod in a `netcheck` namespace (CoreDNS rewrite), what is *not* exposed at the edge, the `apps` NetworkPolicies, and readiness (a not-ready pod leaves the endpoints and is not restarted) |
 | [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh) | Phase 3: observability pods and PVCs, metrics/logs/traces of all three services in Prometheus, Loki and Tempo, the service graph, exemplars, blocked write endpoints at the edge, Grafana login and datasources |
 | [`scripts/verify-status.sh`](scripts/verify-status.sh) | Phase 4: status page and Status API contract, NetworkPolicies of the status workloads, both dashboards have data for every service, and the signal correlations followed end to end |
+| [`scripts/verify-alerting.sh`](scripts/verify-alerting.sh) | Phase 5: the project's rules loaded and healthy, recording rules have data, Watchdog firing, Alertmanager runs the project's configuration, a test alert arrives as email in Mailpit, every scrape target is up under the `observability` default deny, and direct access from another namespace is blocked. The failure scenarios themselves run with `make demo` |
 
 Each check prints `PASS`/`FAIL` and the script exits non-zero on any failure. The checks retry while the first export and
 scrape cycles complete, so they can run right after `make up`.

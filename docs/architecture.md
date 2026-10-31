@@ -347,50 +347,57 @@ action. Readiness covers **instance-local** conditions only.
 - **Page on symptoms, not causes.** Critical alerts describe what users experience: the service is unreachable, requests fail or responses are slow.
   Causes such as pod restarts or pipeline problems are `warning` alerts and dashboard panels.
 - **Every page must be actionable.** Each alert has `summary`, `description`, `runbook_url` and `dashboard_url` annotations.
-  Runbooks, one for each critical alert, live in `docs/runbooks/` (Phase 5).
+  Every alert has a runbook in [`docs/runbooks/`](runbooks/README.md): symptoms, impact, triage queries, common causes and remediation.
 - **Two severities.** `critical` pages the on-call engineer. `warning` goes to the team mailbox and never pages.
 - **`for:` durations** stop transient spikes from firing alerts. Alertmanager `group_by: [alertname, service]`
   turns one incident into one notification.
 - The thresholds below are **starting points**. They are tuned against SLOs once real traffic has been observed.
 
-**Initial rule set** (Phase 5. The PromQL is illustrative. Final metric names depend on how Prometheus translates OTLP names, which is fixed in Phase 3):
+**Rule set** (Phase 5; plain Prometheus rule files in `deploy/charts/alerting/rules`, each alert unit-tested with `promtool test rules`
+for a firing and a silent case). Recording rules compute per-`service` request rate, 5xx ratio and p95 from the OTLP histogram
+`http_server_request_duration_seconds` (`/admin` excluded), so the alerts, the Status API and the dashboards use the same numbers:
 
-| Alert | Condition (initial) | Severity |
+| Alert | Condition | Severity |
 |---|---|---|
 | `ServiceDown` | blackbox `probe_success == 0` for 1m | critical |
-| `HighErrorRate` | 5xx ratio > **5%** for 5m, per service | critical |
-| `HighLatencyP95` | p95 of `http.server.request.duration` > **500 ms** for 5m | warning (critical for Payment above 1 s) |
-| `PodNotReady`, `PodCrashLooping` | kube-state-metrics | warning |
-| `TelemetryPipelineDown` | Collector export failures or a scrape target down | warning |
-| `ErrorBudgetBurn` (stretch) | multi-window burn rate 14.4× (1h and 5m) on a 99.5% SLO | critical |
-| `Watchdog` (from kube-prometheus-stack) | always firing. Used as a dead man's switch. | none |
+| `HighErrorRate` | 5xx ratio > **5%** over 5m, for 5m, per service | critical |
+| `HighLatencyP95` | p95 > **500 ms** over 5m, for 5m | warning (a second rule: critical for Payment above 1 s) |
+| `ErrorBudgetBurn` | Order's 5xx ratio above 14.4 × 0.5 % over 1h **and** 5m (99.5% availability SLO), for 2m | critical |
+| `PodNotReady` / `PodCrashLooping` | kube-state-metrics: not ready for 2m / `CrashLoopBackOff` for 5m, `service` from the pod label `app.kubernetes.io/name` | warning |
+| `TelemetryPipelineDown` | Collector, Loki, Tempo or blackbox target down; no Collector at all; Collector exporter failures | warning |
+| `Watchdog` | always firing; a dead man's switch | none |
 
-Authentication failures (401 and 403, from Phase 6) are tracked separately from 5xx, so they never trigger `HighErrorRate`.
+Authentication failures (401 and 403, from Phase 6) are 4xx: they never count towards `HighErrorRate` or the SLO.
 
-Example error-ratio expression:
+Error ratio (recording rule `service:http_server_errors:ratio_rate5m`):
 
 ```promql
-sum by (service_name) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[5m]))
+sum by (service) (label_replace(rate(http_server_request_duration_seconds_count{k8s_namespace_name="apps", http_response_status_code=~"5..", http_route!~"/admin/.*"}[5m]), "service", "$1", "service_name", "(.+)"))
 /
-sum by (service_name) (rate(http_server_request_duration_seconds_count[5m]))
+sum by (service) (label_replace(rate(http_server_request_duration_seconds_count{k8s_namespace_name="apps", http_route!~"/admin/.*"}[5m]), "service", "$1", "service_name", "(.+)"))
 ```
 
 **Routing and inhibition (Alertmanager)**
 
 - `severity="critical"` goes to the `oncall-email` receiver: `group_wait: 30s`, `group_interval: 5m`, `repeat_interval: 4h`, `send_resolved: true`.
 - `severity="warning"` goes to the `team-email` receiver, with a longer repeat interval.
-- `alertname="Watchdog"` goes to `null` locally. In production it goes to an external heartbeat service, which raises an alert if the alerting
+- `alertname="Watchdog"` goes to a `heartbeat` receiver every minute (a no-op locally). In production it goes to an external heartbeat service, which raises an alert if the alerting
   pipeline itself stops working.
-- **Inhibition:** `ServiceDown` inhibits `HighErrorRate` and `HighLatencyP95` when the `service` label matches. The on-call
-  engineer gets one email about the cause, not several about its symptoms.
+- `group_by: [alertname, service]`; every notification is an HTML and text email with the summary, description, labels and links to the runbook,
+  the dashboard, the Prometheus query and a pre-filled silence. Resolved notifications are sent too.
+- **Inhibition:** `ServiceDown` inhibits `HighErrorRate`, `HighLatencyP95` and `ErrorBudgetBurn` when the `service` label matches. The on-call
+  engineer gets one email about the cause, not several about its symptoms. The project's faster `PodNotReady`/`PodCrashLooping` also
+  inhibit kube-prometheus-stack's generic `KubePodNotReady`/`KubePodCrashLooping` for the same pod.
 
-**Stretch goal: SLO burn-rate alerts.** Given an availability SLO of 99.5% over 30 days, which leaves a 0.5%
-error budget, use **multi-window, multi-burn-rate** alerts from the [SRE Workbook][sre-slo-alerting]:
-page when the burn rate is above 14.4 over 1h **and** 5m, and open a ticket when it is above 6 over 6h **and** 30m. This replaces
-fixed thresholds with alerts tied to user impact and error budget.
+**SLO burn-rate alert.** Given an availability SLO of 99.5% over 30 days for Order, which leaves a 0.5%
+error budget, `ErrorBudgetBurn` is the fast-burn page of the **multi-window, multi-burn-rate** approach from the [SRE Workbook][sre-slo-alerting]:
+burn rate above 14.4 over 1h **and** 5m. The slow-burn ticket (above 6 over 6h **and** 30m) and SLOs for the other services are the next
+step; in production SLO alerts replace most fixed thresholds.
 
-**Demo scenarios** (`scripts/demo.sh`, Phase 5): (a) Payment returns 30% errors → `HighErrorRate` email. (b) User adds 800 ms latency →
-`HighLatencyP95`. (c) Payment scaled to 0 → `ServiceDown`. (d) readiness set to false → `PodNotReady`.
+**Demo scenarios** (`scripts/demo.sh`, `make demo`): (a) Payment returns 30% errors → `HighErrorRate` email to on-call. (c) Payment scaled to 0
+right after → `ServiceDown` email, and Payment's still active `HighErrorRate` is inhibited. (b) User adds 800 ms latency →
+`HighLatencyP95` email to the team. (d) Order's readiness set to false → `PodNotReady`. The script checks the alert in Alertmanager,
+the email in Mailpit (with its runbook and dashboard links) and the status page, then resets the fault and waits for the resolved emails.
 
 ## 8. Status API contract
 
@@ -485,7 +492,9 @@ Envoy Gateway. The `status.localtest.me` route sends `/api` to the Status API an
 - **TLS.** Phases 1 to 5 use plain HTTP. **Phase 6 requires HTTPS**, because Envoy Gateway OIDC requires an HTTPS redirect URL.
   A mkcert local CA and cert-manager issue a `*.localtest.me` wildcard certificate for the Gateway's HTTPS listener.
 - **NetworkPolicy.** Every namespace denies all traffic by default. These flows are allowed: the Gateway to the apps, the apps to the Collector,
-  Prometheus and the blackbox exporter to metrics and probe ports, and Order to User and Payment, plus DNS egress. kindnet, the default
+  Prometheus and the blackbox exporter to metrics and probe ports, and Order to User and Payment, plus DNS egress. In `observability`
+  (Phase 5) every flow of the stack is listed explicitly: the Collector to the three stores, Grafana to its datasources,
+  Alertmanager to Mailpit, the Status API to Prometheus and Alertmanager, the Gateway to the UIs, and the operators and sidecars to the API server. kindnet, the default
   CNI, has [enforced NetworkPolicy since kind v0.24][kind-v024].
 
 ## 10. Security and identity (Phase 6)
