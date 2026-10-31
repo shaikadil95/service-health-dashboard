@@ -1,0 +1,16 @@
+{{- if .Values.rules.enabled }}
+{{- range $path, $_ := .Files.Glob "rules/*.rules.yaml" }}
+# Rendered from {{ $path }} unchanged: the same file is checked and unit-tested with promtool
+# (`make rules-test`), so what is tested is what is deployed.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: shd-{{ base $path | trimSuffix ".rules.yaml" }}
+  labels:
+    app.kubernetes.io/part-of: service-health-dashboard
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+spec:
+{{ $.Files.Get $path | indent 2 }}
+---
+{{- end }}
+{{- end }}

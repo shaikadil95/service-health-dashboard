@@ -11,10 +11,13 @@ crds:
   enabled: false
 
 # Default alerting and recording rules. Rules for control-plane components that are not scraped on
-# kind (see below) are switched off so that they do not alert on missing targets. Routing of these
-# alerts to people arrives in Phase 5 (deploy/alerts).
+# kind (see below) are switched off so that they do not alert on missing targets. The "general" group
+# (Watchdog, InfoInhibitor, TargetDown) is replaced by the project's own rules in
+# charts/alerting/rules (Watchdog, TelemetryPipelineDown); the other defaults stay and are routed to
+# the team mailbox by severity (charts/alerting/alertmanager).
 defaultRules:
   rules:
+    general: false
     etcd: false
     kubeControllerManager: false
     kubeProxy: false
@@ -107,10 +110,13 @@ prometheus:
         memory: 1536Mi
 
 # --- Alertmanager ------------------------------------------------------------------------------
-# The chart's default configuration routes everything to the "null" receiver. Routes, receivers
-# and inhibition rules arrive in Phase 5 (Mailpit).
+# Routes, receivers, inhibition rules and the email template come from the Secret alertmanager-shd,
+# which the alerting release renders from charts/alerting/alertmanager (tested with amtool). The
+# chart's own default configuration is not used.
 alertmanager:
   alertmanagerSpec:
+    useExistingSecret: true
+    configSecret: alertmanager-shd
     externalUrl: http://alertmanager.localtest.me
     storage:
       volumeClaimTemplate:
@@ -245,6 +251,11 @@ grafana:
 # --- Exporters ---------------------------------------------------------------------------------
 kube-state-metrics:
   fullnameOverride: kube-state-metrics
+  # Exposes the pod label app.kubernetes.io/name as kube_pod_labels{label_app_kubernetes_io_name},
+  # which the pod alerts use as their `service` label. Only this one label: pod labels are
+  # otherwise high-cardinality noise.
+  metricLabelsAllowlist:
+    - pods=[app.kubernetes.io/name]
   resources:
     requests:
       cpu: 10m

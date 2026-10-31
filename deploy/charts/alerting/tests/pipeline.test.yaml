@@ -1,0 +1,98 @@
+# promtool unit tests for rules/pipeline.rules.yaml. Run with `make rules-test`.
+rule_files:
+  - ../rules/pipeline.rules.yaml
+evaluation_interval: 30s
+
+tests:
+  - name: TelemetryPipelineDown when Loki cannot be scraped; healthy targets stay silent
+    interval: 30s
+    input_series:
+      - series: 'up{namespace="observability", job="observability/loki", instance="10.244.0.9:3100"}'
+        values: '1 1 0x20'
+      - series: 'up{namespace="observability", job="observability/otel-collector-agent", instance="10.244.0.8:8888"}'
+        values: '1x22'
+      - series: 'up{namespace="observability", job="tempo", instance="10.244.0.10:3200"}'
+        values: '1x22'
+      # Not part of the telemetry pipeline (Grafana has its own consequences): ignored here.
+      - series: 'up{namespace="observability", job="grafana", instance="10.244.0.11:3000"}'
+        values: '0x22'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: TelemetryPipelineDown
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: TelemetryPipelineDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: telemetry-pipeline
+              reason: target-down
+              namespace: observability
+              job: observability/loki
+              instance: 10.244.0.9:3100
+            exp_annotations:
+              summary: "Telemetry pipeline component observability/loki is down"
+              description: "Prometheus cannot scrape observability/loki (10.244.0.9:3100) for more than 5 minutes. Metrics, logs, traces or probe results may be missing, so dashboards and alerts can look healthier than the services are."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/TelemetryPipelineDown.md
+              dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview
+
+  - name: TelemetryPipelineDown when no Collector agent exists at all
+    interval: 30s
+    input_series:
+      - series: 'up{namespace="observability", job="tempo", instance="10.244.0.10:3200"}'
+        values: '1x22'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: TelemetryPipelineDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: telemetry-pipeline
+              reason: no-collector
+            exp_annotations:
+              summary: "No OpenTelemetry Collector agent is up"
+              description: "No Collector agent has been scraped successfully for more than 5 minutes (DaemonSet missing, pods not running, or the PodMonitor broken). No new traces, metrics or logs of the services arrive."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/TelemetryPipelineDown.md
+              dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview
+
+  - name: TelemetryPipelineDown when an exporter keeps failing for 10 minutes
+    interval: 30s
+    input_series:
+      - series: 'up{namespace="observability", job="observability/otel-collector-agent", instance="10.244.0.8:8888"}'
+        values: '1x40'
+      - series: 'otelcol_exporter_send_failed_spans{job="observability/otel-collector-agent", exporter="otlp_grpc/tempo"}'
+        values: '0+30x40'
+      # Failures that stopped (counter flat): no alert.
+      - series: 'otelcol_exporter_send_failed_log_records{job="observability/otel-collector-agent", exporter="otlp_http/loki"}'
+        values: '0 10 20 20x37'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: TelemetryPipelineDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: TelemetryPipelineDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: telemetry-pipeline
+              reason: export-failures
+              exporter: otlp_grpc/tempo
+            exp_annotations:
+              summary: "Collector exporter otlp_grpc/tempo keeps failing"
+              description: "The Collector has been failing to send data through otlp_grpc/tempo for more than 10 minutes (1 items/s dropped after retries). The backend is down, unreachable or rejecting the data."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/TelemetryPipelineDown.md
+              dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview
+
+  - name: Watchdog is always firing
+    interval: 30s
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: Watchdog
+        exp_alerts:
+          - exp_labels:
+              severity: none
+              service: alerting-pipeline
+            exp_annotations:
+              summary: "Alerting pipeline heartbeat (always firing)"
+              description: "This alert is always firing. If it stops arriving at the heartbeat receiver, the alerting pipeline (Prometheus rule evaluation, Prometheus -> Alertmanager, or Alertmanager notifications) is broken."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/Watchdog.md

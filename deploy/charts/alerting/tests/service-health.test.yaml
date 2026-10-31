@@ -1,0 +1,165 @@
+# promtool unit tests for rules/service-health.rules.yaml: each alert fires for the faulty service
+# and stays silent for the healthy ones. Run with `make rules-test`.
+rule_files:
+  - ../rules/service-health.rules.yaml
+evaluation_interval: 30s
+
+tests:
+  # payment: 10 % 5xx (fires). user: 1.6 % 5xx (below 5 %). order: no 5xx at all (0 %, not "no data").
+  - name: HighErrorRate fires above 5 % only
+    interval: 30s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name="payment", http_route="/payments", http_response_status_code="201"}'
+        values: '0+54x30'
+      - series: 'http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name="payment", http_route="/payments", http_response_status_code="500"}'
+        values: '0+6x30'
+      - series: 'http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name="user", http_route="/users/{user_id}", http_response_status_code="200"}'
+        values: '0+60x30'
+      - series: 'http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name="user", http_route="/users/{user_id}", http_response_status_code="500"}'
+        values: '0+1x30'
+      - series: 'http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name="order", http_route="/orders", http_response_status_code="201"}'
+        values: '0+60x30'
+      # /admin/faults calls are demo tooling, not user traffic: their 500s must not count.
+      - series: 'http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name="order", http_route="/admin/faults", http_response_status_code="500"}'
+        values: '0+60x30'
+      # 401/403 (Phase 6) are client errors and must not count either.
+      - series: 'http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name="order", http_route="/orders", http_response_status_code="401"}'
+        values: '0+60x30'
+    promql_expr_test:
+      - expr: service:http_server_errors:ratio_rate5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'service:http_server_errors:ratio_rate5m{service="order"}'
+            value: 0
+          - labels: 'service:http_server_errors:ratio_rate5m{service="payment"}'
+            value: 0.1
+          - labels: 'service:http_server_errors:ratio_rate5m{service="user"}'
+            value: 0.01639344262295082
+    alert_rule_test:
+      # Condition true, but the 5 minute "for" has not passed yet: pending, nothing fires.
+      - eval_time: 4m
+        alertname: HighErrorRate
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: payment
+            exp_annotations:
+              summary: "payment returns 5xx for 10% of requests"
+              description: "More than 5 % of the requests to payment have failed with a 5xx status over the last 5 minutes, for more than 5 minutes (current: 10%)."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/HighErrorRate.md
+              dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=payment
+      # order: 0 % over 1 h as well, so the SLO burn alert stays silent.
+      - eval_time: 10m
+        alertname: ErrorBudgetBurn
+        exp_alerts: []
+
+  # user: all requests between 0.5 s and 1 s (p95 0.975 s, warning). payment: between 1 s and 2.5 s
+  # (p95 2.425 s, warning and critical). order: all below 0.1 s.
+  - name: HighLatencyP95 warning above 500 ms, critical for payment above 1 s
+    interval: 30s
+    input_series:
+      - series: 'http_server_request_duration_seconds_bucket{k8s_namespace_name="apps", service_name="user", http_route="/users/{user_id}", le="0.5"}'
+        values: '0x30'
+      - series: 'http_server_request_duration_seconds_bucket{k8s_namespace_name="apps", service_name="user", http_route="/users/{user_id}", le="1"}'
+        values: '0+60x30'
+      - series: 'http_server_request_duration_seconds_bucket{k8s_namespace_name="apps", service_name="user", http_route="/users/{user_id}", le="+Inf"}'
+        values: '0+60x30'
+      - series: 'http_server_request_duration_seconds_bucket{k8s_namespace_name="apps", service_name="payment", http_route="/payments", le="1"}'
+        values: '0x30'
+      - series: 'http_server_request_duration_seconds_bucket{k8s_namespace_name="apps", service_name="payment", http_route="/payments", le="2.5"}'
+        values: '0+60x30'
+      - series: 'http_server_request_duration_seconds_bucket{k8s_namespace_name="apps", service_name="payment", http_route="/payments", le="+Inf"}'
+        values: '0+60x30'
+      - series: 'http_server_request_duration_seconds_bucket{k8s_namespace_name="apps", service_name="order", http_route="/orders", le="0.1"}'
+        values: '0+60x30'
+      - series: 'http_server_request_duration_seconds_bucket{k8s_namespace_name="apps", service_name="order", http_route="/orders", le="+Inf"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HighLatencyP95
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: HighLatencyP95
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: payment
+            exp_annotations:
+              summary: "payment is slow: p95 2.425s"
+              description: "The 95th percentile response time of payment has been above 500 ms over the last 5 minutes, for more than 5 minutes (current: 2.425s)."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/HighLatencyP95.md
+              dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=payment
+          - exp_labels:
+              severity: warning
+              service: user
+            exp_annotations:
+              summary: "user is slow: p95 975ms"
+              description: "The 95th percentile response time of user has been above 500 ms over the last 5 minutes, for more than 5 minutes (current: 975ms)."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/HighLatencyP95.md
+              dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=user
+          - exp_labels:
+              severity: critical
+              service: payment
+            exp_annotations:
+              summary: "payment is very slow: p95 2.425s"
+              description: "The 95th percentile response time of payment has been above 1 s over the last 5 minutes, for more than 5 minutes (current: 2.425s). Checkout is affected."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/HighLatencyP95.md
+              dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=payment
+
+  - name: ServiceDown after 1 minute of failing probes
+    interval: 30s
+    input_series:
+      - series: 'probe_success{job="blackbox-readyz", namespace="apps", service="payment", instance="http://payment.apps.svc.cluster.local/readyz"}'
+        values: '1 1 0x10'
+      - series: 'probe_success{job="blackbox-readyz", namespace="apps", service="user", instance="http://user.apps.svc.cluster.local/readyz"}'
+        values: '1x12'
+      # A single failed probe that recovers (flapping) must not page.
+      - series: 'probe_success{job="blackbox-readyz", namespace="apps", service="order", instance="http://order.apps.svc.cluster.local/readyz"}'
+        values: '1 1 0 1x9'
+    alert_rule_test:
+      - eval_time: 90s
+        alertname: ServiceDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: payment
+              namespace: apps
+            exp_annotations:
+              summary: "payment is down: its readiness probe fails"
+              description: "The synthetic check of http://payment.apps.svc.cluster.local/readyz has failed for more than 1 minute: no ready pod answers behind the Service, so every request to payment fails."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/ServiceDown.md
+              dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=payment
+
+  # order: 10 % 5xx from the start, so both the 1 h and the 5 m ratio exceed 14.4 x 0.5 % = 7.2 %.
+  - name: ErrorBudgetBurn for the order SLO
+    interval: 30s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name="order", http_route="/orders", http_response_status_code="201"}'
+        values: '0+54x20'
+      - series: 'http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name="order", http_route="/orders", http_response_status_code="502"}'
+        values: '0+6x20'
+      # payment burns too, but the SLO alert is defined for order only.
+      - series: 'http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name="payment", http_route="/payments", http_response_status_code="500"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ErrorBudgetBurn
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ErrorBudgetBurn
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: order
+              slo: order-availability-99.5
+            exp_annotations:
+              summary: "order is burning its error budget 14.4x too fast"
+              description: "The 5xx ratio of order is above 7.2 % (14.4 times the 0.5 % budget of the 99.5 % availability SLO) over both the last hour and the last 5 minutes. At this rate the 30-day error budget is gone in about 2 days."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/ErrorBudgetBurn.md
+              dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=order

@@ -1,0 +1,54 @@
+{{/*
+  Email notification templates (https://prometheus.io/docs/alerting/latest/notifications/).
+  Every alert carries summary, description, runbook_url and dashboard_url annotations
+  (deploy/charts/alerting/rules), so the email links straight to the next step.
+*/}}
+
+{{ define "shd.email.subject" -}}
+[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.severity | toUpper }} {{ .CommonLabels.alertname }}{{ with .CommonLabels.service }} on {{ . }}{{ end }}
+{{- end }}
+
+{{ define "shd.email.text" -}}
+{{ if eq .Status "firing" }}FIRING{{ else }}RESOLVED{{ end }}: {{ .CommonLabels.alertname }}{{ with .CommonLabels.service }} on {{ . }}{{ end }} (severity {{ .CommonLabels.severity }})
+{{ range .Alerts }}
+- [{{ .Status | toUpper }}] {{ .Annotations.summary }}
+  {{ .Annotations.description }}
+  Started: {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}{{ if eq .Status "resolved" }}, resolved: {{ .EndsAt.Format "2006-01-02 15:04:05 MST" }}{{ end }}
+  Labels: {{ range .Labels.SortedPairs }}{{ .Name }}={{ .Value }} {{ end }}
+{{- with .Annotations.runbook_url }}
+  Runbook: {{ . }}{{ end }}
+{{- with .Annotations.dashboard_url }}
+  Dashboard: {{ . }}{{ end }}
+{{ end }}
+Alertmanager: {{ .ExternalURL }}/#/alerts?receiver={{ .Receiver | urlquery }}
+Silence: {{ .ExternalURL }}/#/silences/new?filter=%7B{{ range .CommonLabels.SortedPairs }}{{ .Name }}%3D%22{{ .Value | urlquery }}%22%2C{{ end }}%7D
+{{- end }}
+
+{{ define "shd.email.html" -}}
+<!DOCTYPE html>
+<html>
+<body style="font-family: -apple-system, Segoe UI, Helvetica, Arial, sans-serif; color: #1f2328; max-width: 720px;">
+<h2 style="margin-bottom: 4px; color: {{ if eq .Status "firing" }}{{ if eq .CommonLabels.severity "critical" }}#cf222e{{ else }}#9a6700{{ end }}{{ else }}#1a7f37{{ end }};">
+  {{ if eq .Status "firing" }}Firing{{ else }}Resolved{{ end }}: {{ .CommonLabels.alertname }}{{ with .CommonLabels.service }} on {{ . }}{{ end }}
+</h2>
+<p style="margin-top: 0; color: #59636e;">Severity <strong>{{ .CommonLabels.severity }}</strong> &middot; {{ .Alerts | len }} alert(s) &middot; receiver {{ .Receiver }}</p>
+{{ range .Alerts }}
+<table cellpadding="6" style="border: 1px solid #d1d9e0; border-radius: 6px; width: 100%; margin-bottom: 12px; border-collapse: separate;">
+  <tr><td colspan="2"><strong>[{{ .Status | toUpper }}] {{ .Annotations.summary }}</strong></td></tr>
+  <tr><td colspan="2">{{ .Annotations.description }}</td></tr>
+  <tr><td style="color: #59636e; width: 110px;">Started</td><td>{{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}{{ if eq .Status "resolved" }} (resolved {{ .EndsAt.Format "15:04:05 MST" }}){{ end }}</td></tr>
+  <tr><td style="color: #59636e;">Labels</td><td style="font-family: monospace; font-size: 12px;">{{ range .Labels.SortedPairs }}{{ .Name }}={{ .Value }} {{ end }}</td></tr>
+  <tr><td style="color: #59636e;">Next steps</td><td>
+    {{- with .Annotations.runbook_url }}<a href="{{ . }}">Runbook</a>{{ end }}
+    {{- with .Annotations.dashboard_url }} &middot; <a href="{{ . }}">Dashboard</a>{{ end }}
+    {{- with .GeneratorURL }} &middot; <a href="{{ . }}">Query in Prometheus</a>{{ end }}
+  </td></tr>
+</table>
+{{ end }}
+<p style="color: #59636e; font-size: 12px;">
+  <a href="{{ .ExternalURL }}/#/alerts?receiver={{ .Receiver | urlquery }}">Open in Alertmanager</a> &middot;
+  <a href="{{ .ExternalURL }}/#/silences/new?filter=%7B{{ range .CommonLabels.SortedPairs }}{{ .Name }}%3D%22{{ .Value | urlquery }}%22%2C{{ end }}%7D">Silence this group</a>
+</p>
+</body>
+</html>
+{{- end }}

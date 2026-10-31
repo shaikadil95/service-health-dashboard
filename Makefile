@@ -2,6 +2,7 @@
 # Phase 1: services (uv, compose). Phase 2: local Kubernetes platform (kind, Helm, helmfile).
 # Phase 3: telemetry pipeline and storage (Collector, Prometheus, Loki, Tempo, Grafana, k6).
 # Phase 4: Grafana correlations and dashboards, Status API and status page (web/, pnpm).
+# Phase 5: alert rules (promtool-tested), Alertmanager routing to Mailpit, runbooks, scripts/demo.sh.
 
 SHELL := /usr/bin/env bash
 .SHELLFLAGS := -euo pipefail -c
@@ -31,7 +32,7 @@ sync: ## Install the uv workspace (all services + dev tools) into .venv
 	uv sync --all-packages --locked
 
 .PHONY: lint
-lint: sync ## Lint and check formatting (ruff) and that uv.lock is up to date
+lint: sync rules-lint ## Lint: ruff, formatting, uv.lock up to date, alert rules and Alertmanager config
 	uv lock --check
 	uv run ruff check .
 	uv run ruff format --check .
@@ -42,8 +43,28 @@ fmt: sync ## Auto-fix lint findings and format the code
 	uv run ruff format .
 
 .PHONY: test
-test: sync ## Run the unit tests
+test: sync rules-test ## Run the unit tests (pytest) and the alert rule and Alertmanager routing tests
 	uv run pytest
+
+# Alert rules and Alertmanager configuration (deploy/charts/alerting) are checked with promtool and
+# amtool from the same Prometheus and Alertmanager versions as kube-prometheus-stack, run through the
+# container engine, so no local install is needed.
+PROMETHEUS_IMAGE := quay.io/prometheus/prometheus:v3.15.1
+ALERTMANAGER_IMAGE := quay.io/prometheus/alertmanager:v0.34.2
+ALERTING_CHART := $(CURDIR)/deploy/charts/alerting
+PROMTOOL_RUN := $(ENGINE) run --rm --entrypoint sh -v "$(ALERTING_CHART):/work:ro" -w /work $(PROMETHEUS_IMAGE) -c
+AMTOOL_RUN := $(ENGINE) run --rm --entrypoint sh -v "$(ALERTING_CHART)/alertmanager:/etc/alertmanager/config:ro" \
+  -v "$(ALERTING_CHART)/tests:/tests:ro" $(ALERTMANAGER_IMAGE) -c
+
+.PHONY: rules-lint
+rules-lint: ## promtool check rules and amtool check-config (alerting chart)
+	$(PROMTOOL_RUN) 'promtool check rules rules/*.rules.yaml'
+	$(AMTOOL_RUN) 'amtool check-config /etc/alertmanager/config/alertmanager.yaml'
+
+.PHONY: rules-test
+rules-test: ## promtool unit tests of every alert rule; Alertmanager routing and email template tests
+	$(PROMTOOL_RUN) 'promtool test rules tests/*.test.yaml'
+	$(AMTOOL_RUN) /tests/alertmanager.test.sh
 
 .PHONY: build
 build: ## Build the service and web images with the container engine

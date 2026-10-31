@@ -1,0 +1,9 @@
+apiVersion: v2
+name: alerting
+description: >-
+  Detection and notification: the project's Prometheus alerting and recording rules (PrometheusRule
+  resources rendered from the plain rule files in rules/, which promtool unit-tests in tests/), the
+  Alertmanager configuration (routing, inhibition, email template) and Mailpit, the local SMTP sink.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

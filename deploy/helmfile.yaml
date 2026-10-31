@@ -143,6 +143,15 @@ releases:
     disableValidationOnInstall: true # ServiceMonitor
     values: [values/blackbox-exporter.yaml]
 
+  # Alert and recording rules, the Alertmanager configuration Secret and Mailpit (Phase 5). After
+  # kube-prometheus-stack, whose Operator admission webhook validates PrometheusRules.
+  - name: alerting
+    namespace: observability
+    chart: ./charts/alerting
+    labels: { tier: observability }
+    needs: [observability/kube-prometheus-stack]
+    disableValidationOnInstall: true # PrometheusRule, ServiceMonitor
+
   # Routes for the UIs, Probe resources and the Envoy PodMonitor.
   - name: observability-config
     namespace: observability
