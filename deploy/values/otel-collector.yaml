@@ -217,9 +217,11 @@ securityContext:
   seccompProfile:
     type: RuntimeDefault
 
+# Measured 70-220 MiB working set (higher after a start while backends were still down and the
+# exporters' retry queues filled). memory_limiter refuses data at 80 % of the limit.
 resources:
   requests:
     cpu: 50m
-    memory: 128Mi
+    memory: 192Mi
   limits:
-    memory: 384Mi
+    memory: 512Mi
