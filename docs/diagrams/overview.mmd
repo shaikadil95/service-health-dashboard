@@ -1,0 +1,39 @@
+%% Architecture overview: Service Health Dashboard (local kind cluster)
+flowchart LR
+  client(["Browser / k6"])
+  gw["Envoy Gateway<br/>*.localtest.me"]
+
+  subgraph apps["apps namespace"]
+    user["User svc"]
+    order["Order svc"]
+    pay["Payment svc"]
+  end
+
+  subgraph obs["observability namespace"]
+    otel["OTel Collector<br/>DaemonSet"]
+    prom["Prometheus"]
+    loki["Loki"]
+    tempo["Tempo"]
+    am["Alertmanager"]
+    graf["Grafana"]
+    sapi["Status API<br/>+ status page"]
+    mail(["Mailpit inbox<br/>on-call"])
+    bb["Blackbox<br/>exporter"]
+  end
+
+  client --> gw
+  gw --> order & user & pay
+  order --> user
+  order --> pay
+  gw --> graf & sapi
+
+  apps -. "OTLP traces + metrics,<br/>stdout logs" .-> otel
+  otel --> prom & loki & tempo
+  tempo -- "span metrics" --> prom
+  prom -- "alerts" --> am
+  am -- "SMTP" --> mail
+  prom -- "scrape" --> bb
+  bb -. "probe /readyz" .-> apps
+
+  graf --> prom & loki & tempo
+  sapi --> prom & am

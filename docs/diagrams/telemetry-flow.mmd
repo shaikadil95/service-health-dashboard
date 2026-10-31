@@ -1,0 +1,38 @@
+%% Telemetry data flow: push (OTLP) and pull (scrape) paths
+flowchart LR
+  svc["FastAPI service<br/>OTel SDK"]
+  stdout["Container stdout<br/>JSON logs + trace_id"]
+
+  subgraph col["OTel Collector (DaemonSet, one per node)"]
+    rotlp["otlp receiver<br/>:4317 / :4318"]
+    rfile["filelog receiver<br/>/var/log/pods"]
+    proc["memory_limiter<br/>k8sattributes<br/>batch"]
+  end
+
+  subgraph backends["Storage backends"]
+    prom["Prometheus<br/>OTLP + remote-write receivers"]
+    loki["Loki"]
+    tempo["Tempo"]
+    mg["Tempo<br/>metrics-generator"]
+  end
+
+  ksm["kube-state-metrics"]
+  bb["blackbox exporter"]
+  nodeexp["node-exporter<br/>kubelet / cAdvisor"]
+  graf["Grafana"]
+
+  svc -- "OTLP: traces + metrics" --> rotlp
+  svc -- "writes" --> stdout
+  stdout -- "tail" --> rfile
+  rotlp --> proc
+  rfile --> proc
+  proc -- "OTLP metrics" --> prom
+  proc -- "OTLP logs" --> loki
+  proc -- "OTLP traces" --> tempo
+  tempo --> mg
+  mg -- "remote_write:<br/>span metrics, service graph" --> prom
+  prom -- "scrape" --> ksm
+  prom -- "scrape" --> nodeexp
+  prom -- "scrape" --> bb
+  bb -. "HTTP probe /readyz" .-> svc
+  graf -- "PromQL / LogQL / TraceQL" --> backends

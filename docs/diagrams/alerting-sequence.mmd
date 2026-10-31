@@ -1,0 +1,30 @@
+%% Detection and notification: a Payment error spike reaches the on-call engineer
+sequenceDiagram
+  autonumber
+  participant Svc as Payment svc
+  participant Col as OTel Collector
+  participant Prom as Prometheus
+  participant AM as Alertmanager
+  participant Mail as Mailpit
+  actor Eng as On-call engineer
+  participant Graf as Grafana
+  participant SAPI as Status API
+
+  Svc->>Col: OTLP metrics (5xx rate rising)
+  Col->>Prom: OTLP push (batched)
+  loop every evaluation interval (30s)
+    Prom->>Prom: evaluate PrometheusRules
+  end
+  Note over Prom: HighErrorRate for payment is pending, fires after the 5m for clause
+  Prom->>AM: POST alert (severity=critical, service=payment)
+  AM->>AM: group by alertname and service, dedupe, inhibit
+  AM->>Mail: SMTP email with summary and runbook_url
+  Mail-->>Eng: notification in inbox
+  Eng->>Graf: open dashboard link from email
+  Graf->>Prom: RED metrics and exemplars
+  Note over Graf: exemplar links to Tempo trace, trace links to Loki logs
+  SAPI->>AM: GET /api/v2/alerts
+  SAPI->>Prom: GET /api/v1/query (error ratio, p95, ready replicas)
+  Note over SAPI: payment shown as DEGRADED or DOWN on the status page
+  Prom->>AM: alert resolved
+  AM->>Mail: resolved email (send_resolved)

@@ -1,0 +1,41 @@
+%% Phase 6 (Proposed): ops SSO at the gateway and JWT-protected customer API
+sequenceDiagram
+  autonumber
+  actor Ops as Ops engineer
+  actor Cust as Customer (shop page)
+  participant GW as Envoy Gateway
+  participant KC as Keycloak (sso.localtest.me)
+  participant Prom as Prometheus UI
+  participant Order as Order svc
+
+  rect rgb(235, 245, 255)
+    Note over Ops,Prom: ops realm, OIDC SecurityPolicy (HTTPS, cookieDomain localtest.me)
+    Ops->>GW: GET https://prometheus.localtest.me
+    GW-->>Ops: 302 to Keycloak ops realm (no session cookie)
+    Ops->>KC: login (once for all ops UIs)
+    KC-->>Ops: 302 to redirect URL with code
+    Ops->>GW: GET callback with code
+    GW->>KC: exchange code for tokens (same URL in-cluster via CoreDNS rewrite)
+    KC-->>GW: ID and access token
+    GW-->>Ops: signed session cookie, 302 to original URL
+    Ops->>GW: GET with session cookie
+    GW->>GW: authorize on groups claim (sre, dev, viewer)
+    GW->>Prom: forward request
+    Prom-->>Ops: Prometheus UI
+    Note over Ops,KC: Grafana uses its native Keycloak OAuth with the same SSO session
+  end
+
+  rect rgb(240, 255, 240)
+    Note over Cust,Order: customers realm, JWT SecurityPolicy on api.localtest.me
+    Cust->>KC: login (Auth Code + PKCE, token handling decided in Phase 6)
+    KC-->>Cust: session or access token (aud shop-api)
+    Cust->>GW: POST /orders with Bearer JWT
+    GW->>GW: verify signature (cached JWKS), iss, aud, exp
+    alt token valid
+      GW->>Order: forward request
+      Order->>Order: re-validate JWT and orders:write role
+      Order-->>Cust: 201 Created
+    else invalid or missing
+      GW-->>Cust: 401 Unauthorized (not counted as 5xx)
+    end
+  end
