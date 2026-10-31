@@ -10,7 +10,7 @@ A **lightweight observability solution** for three backend services (User, Order
 It is an architecture exercise that focuses on **design decisions and trade-offs**. It is also a demo you can reproduce on a laptop:
 `make up` → break a service → see red status → receive an email.
 
-> **Status: Phase 0 (design).** This repository contains the design documents only. Code arrives phase by phase. See the [roadmap](docs/roadmap.md).
+> **Status: Phase 2 (local Kubernetes platform).** The design, the three instrumented services and the kind platform with Envoy Gateway are in place. The telemetry stack arrives in Phase 3. See the [roadmap](docs/roadmap.md).
 
 ## Documentation
 
@@ -20,6 +20,8 @@ It is an architecture exercise that focuses on **design decisions and trade-offs
 | [Architecture Decision Records](docs/adr/README.md) | One MADR document for each key decision (ADRs 0001–0010) |
 | [Diagrams](docs/diagrams/) | Mermaid sources (`.mmd`) and rendered SVG files |
 | [Roadmap](docs/roadmap.md) | Phases 0–7 with scope and exit criteria |
+| [Services](services/README.md) | Phase 1: endpoints, probes, fault injection, telemetry |
+| [Local platform](deploy/README.md) | Phase 2: kind, Envoy Gateway, Helm chart, NetworkPolicies, CoreDNS, troubleshooting |
 | [CI/CD placeholder](.github/workflows/README.md) | Planned CI and GitOps CD |
 
 ## Architecture overview
@@ -106,7 +108,7 @@ Full details are in [docs/roadmap.md](docs/roadmap.md).
 
 ## Local URLs
 
-These are available **from Phase 2 onwards**. Each URL appears in the phase that adds its component. `*.localtest.me` resolves to `127.0.0.1` through public DNS.
+These are available **from Phase 2 onwards**. Each URL appears in the phase that adds its component. `*.localtest.me` resolves to `127.0.0.1` through public DNS (if your resolver filters that answer, use `/etc/hosts`; see [deploy/README.md](deploy/README.md#troubleshooting)).
 
 | URL | What | From phase |
 |---|---|---|
@@ -133,7 +135,23 @@ From Phase 6, every URL uses HTTPS.
 
 ## Getting started
 
-**Phase 1 (available now):** run the three instrumented services and an OpenTelemetry Collector locally, without Kubernetes:
+**Kubernetes (Phase 2):** one command creates a kind cluster, installs Envoy Gateway and deploys the three services:
+
+```bash
+make prereqs        # container engine (Podman must be rootful), kind, kubectl, helm 4, helmfile, helm-diff
+make up             # kind cluster + images + helmfile apply + CoreDNS rewrite
+curl -s -X POST http://api.localtest.me/orders -H 'content-type: application/json' \
+  -d '{"user_id":"u-1001","items":[{"sku":"book","quantity":2,"unit_price":"12.50"}],"currency":"EUR"}'
+curl -s http://api.localtest.me/users/u-1001
+make verify         # automated checks: routes, in-cluster URL, NetworkPolicy, readiness semantics
+make down
+```
+
+See [deploy/README.md](deploy/README.md) for the platform design, make targets and troubleshooting
+(for example when your DNS resolver does not return `127.0.0.1` for `*.localtest.me`, or Podman on macOS).
+`scripts/demo.sh` with the failure scenarios arrives in Phase 5.
+
+**Services only (Phase 1):** run the three instrumented services and an OpenTelemetry Collector locally, without Kubernetes:
 
 ```bash
 make lint test      # ruff and pytest
@@ -143,8 +161,6 @@ make compose-down
 ```
 
 See [services/README.md](services/README.md) for endpoints, probes, fault injection and telemetry details.
-
-**Kubernetes: coming in Phase 2.** The planned flow is `make up` to create the cluster and deploy everything, `scripts/demo.sh` to run the failure scenarios, and `make down` to remove it all.
 
 ## Contributing
 

@@ -1,0 +1,30 @@
+# Name of the GatewayClass, Gateway and EnvoyProxy.
+name: edge
+
+envoyProxy:
+  # Fixed Service name (instead of the generated envoy-<ns>-<gateway>-<hash>), so the CoreDNS
+  # rewrite of *.localtest.me has a stable target: <serviceName>.<namespace>.svc.cluster.local.
+  serviceName: envoy-edge
+  # kind maps host ports 80/443 to these NodePorts (deploy/kind/kind-config.yaml).
+  # Only listeners that exist are patched: the HTTPS listener (443 -> 30443) arrives in Phase 6.
+  nodePorts:
+    "80": 30080
+  replicas: 1
+  # Envoy Gateway defaults to requests of 100m CPU / 512Mi; sized down for a laptop.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+gateway:
+  listeners:
+    http:
+      port: 80
+  # Namespaces whose HTTPRoutes may attach to the Gateway.
+  routeNamespaces: [apps]
+
+backends:
+  # 0 disables Envoy's panic mode, so endpoints that are not ready never receive traffic.
+  panicThreshold: 0

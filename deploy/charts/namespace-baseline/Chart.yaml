@@ -1,0 +1,8 @@
+apiVersion: v2
+name: namespace-baseline
+description: >-
+  Baseline NetworkPolicies for a namespace: deny all ingress and egress by default and allow DNS.
+  Workload charts add the allow rules they need.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

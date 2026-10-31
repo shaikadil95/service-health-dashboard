@@ -460,11 +460,15 @@ Envoy Gateway. The `status.localtest.me` route sends `/api` to the Status API an
 | `shop.localtest.me` | Customer shop page | Phase 6 |
 
 - **Envoy Gateway** implements the Kubernetes **Gateway API**. There is one `Gateway` with a listener for `*.localtest.me`
-  and one `HTTPRoute` for each hostname. The Gateway API is the successor to Ingress, and the Kubernetes project has
+  and `HTTPRoute`s per hostname; on `api.localtest.me` each service owns a route for its public path prefix (`/orders`, `/users`),
+  so Payment, `/admin`, `/livez` and `/readyz` are not reachable through the edge. A `BackendTrafficPolicy` disables Envoy's
+  panic mode so that the gateway, like a Kubernetes Service, never sends traffic to pods that are not ready. The Gateway API is the successor to Ingress, and the Kubernetes project has
   [retired ingress-nginx][ingress-nginx-retirement].
 - **`localtest.me`** is a public wildcard DNS name. Every subdomain resolves to `127.0.0.1`, so normally no `/etc/hosts` changes are needed.
   `/etc/hosts` is the fallback if a resolver blocks it. kind `extraPortMappings` forward host ports 80 and 443 to the gateway NodePorts
   30080 and 30443, with `listenAddress: 127.0.0.1` so that nothing is exposed to the LAN. With Podman, a rootful Podman machine forwards these ports to macOS localhost.
+  Exception: Podman on macOS publishes ports through the unprivileged `gvproxy`, and macOS only allows unprivileged binds below 1024 on the wildcard
+  address, so there the ports bind to `0.0.0.0` (or use host ports ≥ 1024 on loopback); see [deploy/README.md](../deploy/README.md#troubleshooting).
 - **CoreDNS rewrite.** Inside the cluster `*.localtest.me` would also resolve to `127.0.0.1`, which is the pod itself. A
   CoreDNS `rewrite` rule maps `*.localtest.me` to the gateway Service, so **the same URL works from the
   browser and from inside the cluster**. Phase 6 needs this: the OIDC issuer URL (`https://sso.localtest.me/realms/...`) must

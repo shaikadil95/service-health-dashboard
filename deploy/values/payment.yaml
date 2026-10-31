@@ -1,0 +1,12 @@
+# Payment service: internal only. No HTTPRoute; only order may call it.
+image:
+  repository: localhost/shd/payment-service
+
+networkPolicy:
+  ingressFrom:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: order
+
+httpRoute:
+  enabled: false

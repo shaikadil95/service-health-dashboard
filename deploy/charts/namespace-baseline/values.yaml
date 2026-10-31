@@ -1,0 +1,4 @@
+dns:
+  namespace: kube-system
+  podSelector:
+    k8s-app: kube-dns
