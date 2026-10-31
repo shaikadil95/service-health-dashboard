@@ -128,7 +128,7 @@ A k6 load generator sends steady traffic so that there is always something to ob
 | Grafana | Dashboards as code (Service Health Overview, Service Detail, Telemetry Pipeline), Explore, Traces Drilldown, and links between signals (exemplars to traces to logs) | Part of kube-prometheus-stack | [0004](adr/0004-prometheus-otlp-push-and-scrape.md) |
 | Status API | FastAPI backend for frontend, itself instrumented with OTel. Queries Prometheus and Alertmanager and computes each service's status. | Deployment | [0006](adr/0006-status-api-bff-and-status-page.md) |
 | Web frontends | React, TypeScript, Vite, Tailwind and shadcn/ui in a pnpm monorepo under `web/`: `apps/status` (status page, Phase 4), `apps/shop` (customer page, Phase 6) and the shared `packages/ui` (`@workspace/ui`). Built as static assets. | `nginx-unprivileged` Deployment per app | [0006](adr/0006-status-api-bff-and-status-page.md) |
-| k6 | Steady, low background traffic for the demo | Job or Deployment | — |
+| k6 | Steady, low background traffic for the demo | Deployment ([`loadgen/`](../loadgen)) | — |
 | Envoy Gateway | Gateway API implementation. Host-based routing on `*.localtest.me`, TLS, and OIDC and JWT authentication from Phase 6. | Deployment and managed Envoy proxy | [0008](adr/0008-envoy-gateway-as-edge.md) |
 | Keycloak (Phase 6) | Identity provider at `sso.localtest.me`. A `customers` realm for the shop and API, and an `ops` realm for operations UIs. | Official **Keycloak Operator** (`Keycloak` and `KeycloakRealmImport` CRs) with a plain PostgreSQL StatefulSet (official image, PVC) | [0009](adr/0009-keycloak-and-sso.md) |
 | kind on Podman or Docker | Local Kubernetes runtime | Containers on the host | [0010](adr/0010-local-runtime-kind.md) |

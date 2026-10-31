@@ -21,7 +21,7 @@ It is an architecture exercise that focuses on **design decisions and trade-offs
 | [Diagrams](docs/diagrams/) | Mermaid sources (`.mmd`) and rendered SVG files |
 | [Roadmap](docs/roadmap.md) | Phases 0–7 with scope and exit criteria |
 | [Services](services/README.md) | Phase 1: endpoints, probes, fault injection, telemetry |
-| [Local platform](deploy/README.md) | Phase 2: kind, Envoy Gateway, Helm chart, NetworkPolicies, CoreDNS, troubleshooting |
+| [Local platform](deploy/README.md) | Phase 2: kind, Envoy Gateway, Helm chart, NetworkPolicies, CoreDNS, troubleshooting. Phase 3: telemetry pipeline and storage (Collector, Prometheus, Loki, Tempo, Grafana, blackbox, k6) |
 | [CI/CD placeholder](.github/workflows/README.md) | Planned CI and GitOps CD |
 
 ## Architecture overview
@@ -131,19 +131,24 @@ From Phase 6, every URL uses HTTPS.
 - [Helm](https://helm.sh/) **4**
 - [helmfile](https://helmfile.readthedocs.io/) and the [helm-diff](https://github.com/databus23/helm-diff) plugin
 - Phase 1 local run: [uv](https://docs.astral.sh/uv/) and a compose provider (`docker compose`, or `podman compose` with `docker-compose` installed)
-- Later phases: [k6](https://grafana.com/docs/k6/latest/) (Phase 3), [pnpm](https://pnpm.io/) and Node.js for frontend development (Phase 4), [mkcert](https://github.com/FiloSottile/mkcert) (Phase 6)
+- Optional: [k6](https://grafana.com/docs/k6/latest/) to run `loadgen/scripts/orders.js` from the host (Phase 3 runs it in the cluster)
+- Later phases: [pnpm](https://pnpm.io/) and Node.js for frontend development (Phase 4), [mkcert](https://github.com/FiloSottile/mkcert) (Phase 6)
 
 ## Getting started
 
-**Kubernetes (Phase 2):** one command creates a kind cluster, installs Envoy Gateway and deploys the three services:
+**Kubernetes (Phases 2–3):** one command creates a kind cluster, installs Envoy Gateway, the observability stack
+(OTel Collector, Prometheus, Alertmanager, Grafana, Loki, Tempo, blackbox exporter) and the three services, and
+starts a k6 load generator:
 
 ```bash
 make prereqs        # container engine (Podman must be rootful), kind, kubectl, helm 4, helmfile, helm-diff
-make up             # kind cluster + images + helmfile apply + CoreDNS rewrite
+make up             # kind cluster + images + helmfile apply + CoreDNS rewrite (first run: ~15 min of image pulls)
 curl -s -X POST http://api.localtest.me/orders -H 'content-type: application/json' \
   -d '{"user_id":"u-1001","items":[{"sku":"book","quantity":2,"unit_price":"12.50"}],"currency":"EUR"}'
 curl -s http://api.localtest.me/users/u-1001
-make verify         # automated checks: routes, in-cluster URL, NetworkPolicy, readiness semantics
+make verify         # automated checks: routes, NetworkPolicy, readiness, then metrics/logs/traces end to end
+make grafana-password  # http://grafana.localtest.me, user admin
+make load-stop      # or load-start: the k6 background traffic
 make down
 ```
 
