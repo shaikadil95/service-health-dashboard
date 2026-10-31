@@ -1,0 +1,83 @@
+# Grafana Tempo in monolithic (single binary) mode, chart grafana-community/tempo. Tempo's Helm docs list
+# this chart for monolithic mode and tempo-distributed for microservices:
+# https://grafana.com/docs/tempo/latest/set-up-for-tracing/setup-tempo/deploy/kubernetes/helm-chart/
+# Values reference: https://github.com/grafana-community/helm-charts/blob/main/charts/tempo/values.yaml
+#
+# Tempo 3.x: in monolithic mode all components (distributor, live-store, metrics-generator,
+# backend scheduler/worker, querier) run in one process without Kafka.
+# https://grafana.com/docs/tempo/latest/configuration/#deployment-modes
+fullnameOverride: tempo
+
+tempo:
+  reportingEnabled: false
+  # Blocks older than this are deleted by the backend worker (it replaced the 2.x compactor).
+  retention: 24h
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+  # OTLP is the only receiver in use. The chart's Jaeger receivers stay at their defaults because
+  # the chart's Service templates require them (receivers.jaeger: null fails to render); nothing
+  # sends Jaeger and the namespace is not exposed.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+  # Span metrics (RED per service/span) and the service graph, remote-written to Prometheus.
+  # https://grafana.com/docs/tempo/latest/metrics-from-traces/metrics-generator/
+  metricsGenerator:
+    enabled: true
+    storage:
+      # On the PVC, not /tmp.
+      path: /var/tempo/generator/wal
+      remote_write:
+        - url: http://kps-prometheus.observability.svc:9090/api/v1/write
+          send_exemplars: true
+    registry:
+      external_labels:
+        source: tempo
+    processor:
+      service_graphs:
+        # Edges (client span + server span) are matched within this window.
+        wait: 10s
+  overrides:
+    defaults:
+      metrics_generator:
+        processors:
+          - service-graphs
+          - span-metrics
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+
+securityContext:
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+persistence:
+  enabled: true
+  enableStatefulSetAutoDeletePVC: true
+  size: 2Gi
+
+# Tempo's own metrics, scraped by Prometheus.
+serviceMonitor:
+  enabled: true
+  interval: 30s

@@ -1,0 +1,204 @@
+# kube-prometheus-stack (prometheus-community): Prometheus Operator, Prometheus, Alertmanager, Grafana,
+# kube-state-metrics and node-exporter. Values reference:
+# https://github.com/prometheus-community/helm-charts/blob/main/charts/kube-prometheus-stack/values.yaml
+#
+# Short, stable names: kps-prometheus, kps-alertmanager, kps-operator, grafana, kube-state-metrics.
+fullnameOverride: kps
+
+# The CRDs come from the prometheus-operator-crds release (installed first, server-side apply, and
+# upgraded with the chart), not from this chart's crds/ directory, which Helm never upgrades.
+crds:
+  enabled: false
+
+# Default alerting and recording rules. Rules for control-plane components that are not scraped on
+# kind (see below) are switched off so that they do not alert on missing targets. Routing of these
+# alerts to people arrives in Phase 5 (deploy/alerts).
+defaultRules:
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeProxy: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    windows: false
+
+windowsMonitoring:
+  enabled: false
+
+# kind runs etcd, kube-controller-manager and kube-scheduler with their metrics bound to 127.0.0.1,
+# and kube-proxy's metrics address is 127.0.0.1:10249 as well. Their targets would only ever be
+# down, so they are not scraped rather than left red.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+# --- Prometheus Operator -----------------------------------------------------------------------
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+  prometheusConfigReloader:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 25Mi
+      limits:
+        memory: 64Mi
+
+# --- Prometheus --------------------------------------------------------------------------------
+prometheus:
+  prometheusSpec:
+    # Pick up every ServiceMonitor, PodMonitor, Probe, ScrapeConfig and PrometheusRule in the cluster,
+    # not only the ones labelled with this release.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+    # OTLP push from the Collector: POST /api/v1/otlp/v1/metrics (--web.enable-otlp-receiver).
+    # https://prometheus.io/docs/guides/opentelemetry/
+    enableOTLPReceiver: true
+    otlp:
+      # Only low-cardinality resource attributes become labels. job (= service.name) and
+      # instance (= service.instance.id) are always set; the rest stays on target_info.
+      promoteResourceAttributes:
+        - service.name
+        - k8s.namespace.name
+        - k8s.pod.name
+      # Default; spelled out because dashboards and alerts depend on the resulting names, e.g.
+      # http.server.request.duration -> http_server_request_duration_seconds_bucket.
+      translationStrategy: UnderscoreEscapingWithSuffixes
+    # Tempo's metrics-generator remote-writes service-graph and span metrics.
+    enableRemoteWriteReceiver: true
+    # Exemplars (trace IDs on histogram samples) for metric -> trace links in Grafana (Phase 4).
+    enableFeatures:
+      - exemplar-storage
+    exemplars:
+      maxSize: 100000
+    tsdb:
+      # Batching in the Collector and the metrics-generator can deliver samples late.
+      outOfOrderTimeWindow: 30m
+
+    retention: 24h
+    retentionSize: 1.5GB
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 2Gi
+
+    externalUrl: http://prometheus.localtest.me
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 1536Mi
+
+# --- Alertmanager ------------------------------------------------------------------------------
+# The chart's default configuration routes everything to the "null" receiver. Routes, receivers
+# and inhibition rules arrive in Phase 5 (Mailpit).
+alertmanager:
+  alertmanagerSpec:
+    externalUrl: http://alertmanager.localtest.me
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 1Gi
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        memory: 128Mi
+
+# --- Grafana -----------------------------------------------------------------------------------
+grafana:
+  fullnameOverride: grafana
+  # Dashboards are provisioned as code in Phase 4, deliberately few (Overview + Service Detail).
+  # The ~25 default Kubernetes dashboards of the chart are not installed.
+  defaultDashboardsEnabled: false
+  # No PVC: datasources and dashboards are provisioned from ConfigMaps, nothing to keep.
+  persistence:
+    enabled: false
+  # Admin credentials from a Secret that `make deploy` generates once per cluster
+  # (deploy/scripts/grafana-admin-secret.sh), never the chart default "prom-operator".
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  grafana.ini:
+    server:
+      root_url: http://grafana.localtest.me
+    auth.anonymous:
+      enabled: false
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+      check_for_plugin_updates: false
+    users:
+      allow_sign_up: false
+  # Measured ~250-280 MiB working set (Grafana 13) and ~75 MiB per sidecar.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  sidecar:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+    datasources:
+      url: http://kps-prometheus.observability.svc:9090/
+  # Basic connectivity only. Correlations (exemplars -> traces, logs -> traces, traces -> logs and
+  # metrics, service map) are configured in Phase 4.
+  additionalDataSources:
+    - name: Loki
+      uid: loki
+      type: loki
+      access: proxy
+      url: http://loki.observability.svc:3100
+      editable: false
+    - name: Tempo
+      uid: tempo
+      type: tempo
+      access: proxy
+      url: http://tempo.observability.svc:3200
+      editable: false
+
+# --- Exporters ---------------------------------------------------------------------------------
+kube-state-metrics:
+  fullnameOverride: kube-state-metrics
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+prometheus-node-exporter:
+  fullnameOverride: node-exporter
+  resources:
+    requests:
+      cpu: 10m
+      memory: 24Mi
+    limits:
+      memory: 64Mi
