@@ -1,0 +1,276 @@
+# Services
+
+Three small FastAPI services (Python 3.12) that generate realistic telemetry for the Service Health
+Dashboard, plus a shared library that sets up OpenTelemetry, logging, health probes and fault injection.
+
+| Directory | Package | `service.name` | Purpose |
+|---|---|---|---|
+| `telemetry-lib/` | `shd_telemetry` | – | Shared OTel SDK setup, JSON logs, probes, fault injection, graceful shutdown |
+| `user-service/` | `user_service` | `user` | `GET /users/{id}` from a seeded in-memory directory |
+| `order-service/` | `order_service` | `order` | `POST /orders`, `GET /orders/{id}`. Calls User, then Payment |
+| `payment-service/` | `payment_service` | `payment` | `POST /payments`, idempotent by `Idempotency-Key` |
+
+`service.name` uses the short names (`user`, `order`, `payment`) that the architecture document uses in
+queries and in the Status API. Stores are in memory, so there are no database spans and data is lost on restart.
+
+```mermaid
+flowchart LR
+  client((curl / k6)) -->|POST /orders| O[order]
+  O -->|GET /users/id + traceparent| U[user]
+  O -->|POST /payments + traceparent + Idempotency-Key| P[payment]
+  O & U & P -->|OTLP gRPC: traces, metrics| C[OTel Collector]
+  O & U & P -->|stdout JSON logs with trace_id| L[(container logs)]
+```
+
+## Quick start
+
+Prerequisites: [uv](https://docs.astral.sh/uv/), and Docker or Podman with a compose provider
+(`docker compose`, or `podman compose` with `docker-compose` installed).
+
+```bash
+make lint test      # ruff + uv.lock check, pytest
+make compose-up     # build images, start the 3 services + OTel Collector
+make smoke          # end-to-end check, including the distributed trace
+make compose-logs   # follow the Collector debug output
+make compose-down
+```
+
+`make` uses Podman when it is running, otherwise Docker (`make ENGINE=docker ...` to force).
+Host ports (bound to 127.0.0.1): user 8081, order 8082, payment 8083, Collector OTLP 4317/4318, Collector health 13133.
+
+```bash
+curl -s -X POST localhost:8082/orders -H 'content-type: application/json' \
+  -d '{"user_id":"u-1001","items":[{"sku":"book","quantity":2,"unit_price":"12.50"}],"currency":"EUR"}'
+```
+
+Seeded users: `u-1001`, `u-1002`, `u-1003` (active) and `u-1004` (suspended).
+
+## API
+
+| Service | Method and path | Success | Client errors | Server or upstream errors |
+|---|---|---|---|---|
+| user | `GET /users/{id}` | 200 user | 404 unknown user | 500 (injected fault) |
+| order | `POST /orders` | 201 order (`confirmed`), `Location` header | 402 payment declined (order `payment_declined`), 422 invalid body, unknown or suspended user | 502, 503, 504 (see below), 500 (injected fault) |
+| order | `GET /orders/{id}` | 200 order | 404 | 500 (injected fault) |
+| payment | `POST /payments` | 201 `approved` | 400 missing `Idempotency-Key`, 402 `declined` (amount above `PAYMENT_APPROVAL_LIMIT`), 422 invalid body, or the key was reused with a different body | 500 (injected fault) |
+| all | `GET /livez`, `GET /readyz` | 200 | – | `/readyz` 503 when not ready |
+| all | `GET`, `PUT`, `DELETE /admin/faults` | 200 current settings | 422 invalid values | – |
+
+OpenAPI docs are at `/docs` on each service.
+
+### How Order handles upstream failures
+
+Order calls User and Payment with `httpx` and explicit timeouts. W3C `traceparent` is injected by the
+httpx instrumentation.
+
+| Upstream outcome | Order responds | Stored order status (payment call) |
+|---|---|---|
+| Connect error, connect timeout or pool timeout (request never sent) | **503** | `payment_failed` |
+| Read or write timeout (request may have been processed) | **504** | `payment_unknown` |
+| Other transport error, upstream 5xx, or unexpected status | **502** | `payment_unknown` (5xx) or `payment_failed` (4xx) |
+
+When the payment step fails, the order is stored and the 502/503/504 body includes `order_id`, with a
+`Location: /orders/<id>` header. The client can then check the order instead of blindly retrying and creating a
+second one. Failures while validating the user happen before any order exists, so those responses have no `order_id`.
+
+The User `GET` is idempotent, so the transport retries a failed *connection* once. The Payment `POST` is **never retried
+automatically**. It carries `Idempotency-Key: order-<order id>` (following
+[draft-ietf-httpapi-idempotency-key-header](https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/)).
+Payment replays the stored result for a repeated key with `Idempotent-Replayed: true` and counts it only once.
+
+**Limits (demo scope):** the key store is an in-memory dict inside each Payment process. The guarantee therefore holds only
+while the same Payment instance is running. A restart, a rolling update or a second replica loses or splits the keys.
+`POST /orders` also does not accept a client idempotency key yet, so a client retry creates a new order. In production the key
+store would be shared and durable (for example a database table with a unique key), and Order would accept a client
+`Idempotency-Key` and derive the Payment key from it.
+
+## Health probes and graceful shutdown
+
+| Endpoint | Answers | Checks | Never checks |
+|---|---|---|---|
+| `/livez` | "Is the process alive?" | The event loop responds | Dependencies, readiness, fault settings |
+| `/readyz` | "Can this instance take traffic?" | Startup finished (`starting`), not draining after SIGTERM (`draining`), not forced unready by fault injection (`fault_injected`) | Downstream services. A Payment outage makes Order return 503 for affected requests, but Order stays ready. |
+
+`/readyz` returns `{"status":"ready"}` or 503 with `{"status":"not_ready","reasons":[...]}`. Both probes send
+`Cache-Control: no-store`. They are excluded from traces and from HTTP metrics, so probe traffic does not distort the RED metrics.
+
+**SIGTERM:** the server (`shd_telemetry.server.DrainingServer`, a uvicorn subclass) immediately fails
+`/readyz`, keeps serving for `SHUTDOWN_DRAIN_SECONDS` so that endpoints are updated, then stops accepting
+connections, waits up to `SHUTDOWN_TIMEOUT_SECONDS` for in-flight requests, and flushes telemetry. A second signal skips
+the rest of the drain. In Kubernetes (Phase 2) combine this with a short `preStop` sleep and a
+`terminationGracePeriodSeconds` greater than drain plus timeout.
+
+## Fault injection
+
+Each service has `/admin/faults` with three settings. They are read from the environment at startup and can be changed at runtime:
+
+| Field | Env default | Range | Effect |
+|---|---|---|---|
+| `error_rate` | `FAULT_ERROR_RATE` (0) | 0 to 1 | Share of business requests answered with HTTP 500 `{"detail":"Injected fault"}`. The span gets a `fault.injected` event. |
+| `latency_ms` | `FAULT_LATENCY_MS` (0) | 0 to 30000 | Delay added before each business request. It is visible in `http.server.request.duration`. |
+| `ready` | `FAULT_READY` (true) | bool | `false` makes `/readyz` return 503. `/livez` and traffic are unaffected. |
+
+```bash
+curl -X PUT localhost:8083/admin/faults -H 'content-type: application/json' -d '{"error_rate":0.3}'
+curl -X PUT localhost:8081/admin/faults -H 'content-type: application/json' -d '{"latency_ms":800}'
+curl -X PUT localhost:8081/admin/faults -H 'content-type: application/json' -d '{"ready":false}'
+curl -X DELETE localhost:8083/admin/faults    # back to the env defaults
+```
+
+`PUT` is a partial update. Unknown fields or out-of-range values return 422. Faults never affect `/livez`,
+`/readyz` or `/admin`.
+
+> **Security:** `/admin/faults` has no authentication. It is for demos only and **must not be reachable
+> from outside the cluster**. Phase 2 routes only business paths through the gateway and restricts `/admin` with
+> NetworkPolicy. Phase 6 adds authentication. In compose, ports are bound to 127.0.0.1 only.
+
+## Telemetry
+
+`shd_telemetry.configure_telemetry()` creates the tracer, meter and (optional) logger providers. They are configured with
+the [standard `OTEL_*` variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/).
+
+- **Resource:** `service.name`, `service.version`, `service.instance.id` (a UUID for each process), `deployment.environment.name`
+  (default `local`). `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` override them (Phase 2 sets the pod UID and namespace).
+- **Traces:** FastAPI server spans and httpx client spans, W3C Trace Context with parent-based always-on sampling (SDK defaults).
+  The per-message ASGI `http send/receive` spans are disabled.
+- **HTTP metrics:** the stable HTTP semantic conventions, `http.server.request.duration` and `http.client.request.duration`
+  (seconds, buckets 5 ms to 10 s). In `opentelemetry-instrumentation-*` 0.66b2 they are still **opt-in**, and the default is the old
+  `http.server.duration` in ms. The library therefore sets `OTEL_SEMCONV_STABILITY_OPT_IN=http` (which the image also sets) before
+  instrumenting. See the [HTTP semconv migration guide](https://opentelemetry.io/docs/specs/semconv/non-normative/http-migration/). A test asserts that no
+  old-style metric is emitted.
+- **Business metrics** (attributes have low cardinality: never user, order or payment IDs. `currency` is an allow-list of
+  `EUR`, `USD` and `GBP` in both APIs, so clients cannot create new series):
+
+  | OTel instrument | Type, unit | Attributes | Prometheus name after OTLP translation |
+  |---|---|---|---|
+  | `orders.created` | Counter, `{order}` | – | `orders_created_total` |
+  | `payments.processed` | Counter, `{payment}` | `result` = `approved` or `declined` | `payments_processed_total{result}` |
+  | `payment.amount` | Histogram, `{currency_unit}`, buckets 5 to 10000 | `currency`, `result` | `payment_amount_bucket` / `_sum` / `_count` |
+
+  The OTel names follow the [metric naming rules](https://opentelemetry.io/docs/specs/semconv/general/naming/) (no `_total` and no unit in the
+  name). Prometheus adds `_total` and drops `{annotation}` units, which gives the names used in the plan.
+- **Logs:** JSON on stdout, one object per line: `timestamp`, `level`, `logger`, `message`, `service.name`,
+  `trace_id`, `span_id`, `trace_sampled`, plus `extra=` fields (for example `order.id`, `http.route`, `duration_ms`). Trace context
+  comes from `opentelemetry-instrumentation-logging`. Each business request writes one `request completed` access log line inside its span.
+  In Kubernetes the Collector's `filelog` receiver collects stdout (ADR 0001/0002), so **OTLP log export is off by default**
+  (`OTEL_LOGS_EXPORTER=none`). Compose sets `OTEL_LOGS_EXPORTER=otlp` because it has no filelog receiver.
+
+### Environment variables
+
+| Variable | Default | Used by |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (SDK default) | all |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` (also per signal) | `grpc` | all; `http/protobuf` is supported |
+| `OTEL_TRACES_EXPORTER` / `OTEL_METRICS_EXPORTER` | `otlp` | all; `console` and `none` are also accepted |
+| `OTEL_LOGS_EXPORTER` | `none` | all; `otlp` or `console` to also export logs over OTLP |
+| `OTEL_METRIC_EXPORT_INTERVAL` | 60000 ms (compose: 10000) | all |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | – | all |
+| `OTEL_SEMCONV_STABILITY_OPT_IN` | `http` | all |
+| `LOG_LEVEL` | `INFO` | all |
+| `HOST`, `PORT` | `0.0.0.0`, `8080` | all |
+| `SHUTDOWN_DRAIN_SECONDS` | 5 (compose: 2) | all |
+| `SHUTDOWN_TIMEOUT_SECONDS` | 10 | all |
+| `FAULT_ERROR_RATE`, `FAULT_LATENCY_MS`, `FAULT_READY` | 0, 0, true | all |
+| `USER_SERVICE_URL`, `PAYMENT_SERVICE_URL` | `http://localhost:8081`, `http://localhost:8083` | order |
+| `USER_SERVICE_TIMEOUT_SECONDS`, `PAYMENT_SERVICE_TIMEOUT_SECONDS` | 2, 3 | order |
+| `UPSTREAM_CONNECT_TIMEOUT_SECONDS` | 1 | order |
+| `PAYMENT_APPROVAL_LIMIT` | 5000 | payment |
+
+## Container images
+
+A single multi-stage `services/Dockerfile` builds every service (`--build-arg SERVICE=<dir>`; the build context is the repository root):
+
+- The builder stage uses `uv sync --frozen --no-dev --no-editable`. Dependencies are installed in their own cached layer, and the workspace
+  packages are installed as wheels. Only `/app/.venv` is copied into the runtime stage, so there are no sources, no build tools and no dev dependencies.
+- The runtime stage uses `python:3.12-slim` (multi-arch, works on arm64), runs as non-root UID/GID 10001, has root-owned read-only application files, and sets
+  `PYTHONDONTWRITEBYTECODE` (bytecode is precompiled), so it **runs with a read-only root filesystem**. Compose uses
+  `read_only: true`, `cap_drop: [ALL]` and `no-new-privileges`. There is no `HEALTHCHECK`, because Kubernetes probes are used instead.
+- `.dockerignore` is an allow-list: only the workspace manifests, `uv.lock` and `services/*/src` are in the build context.
+- Image size is about 200 MB (arm64), mostly CPython plus `grpcio`.
+
+## Development
+
+The services form one [uv workspace](https://docs.astral.sh/uv/concepts/projects/workspaces/) (root `pyproject.toml` and a single `uv.lock`).
+
+```bash
+uv sync --all-packages                      # create .venv with all services and dev tools
+uv run pytest services/order-service        # one service
+OTEL_TRACES_EXPORTER=console OTEL_METRICS_EXPORTER=none PORT=8081 uv run user-service
+```
+
+The tests use in-memory span and metric exporters (`shd_telemetry.testing`). The Order tests run the real User and
+Payment apps in-process over `httpx.ASGITransport`, with an isolated OTel context. This proves that the trace is linked
+**through the `traceparent` header**, not through shared in-process context. The tests cover business logic, fault injection, probe
+semantics (including readiness while draining), the mapping of upstream failures, idempotency, metric attributes and JSON log correlation.
+
+### Troubleshooting
+
+- **`docker-credential-desktop: executable file not found`** from `podman compose`: a leftover Docker Desktop
+  `credsStore` entry in `~/.docker/config.json`. `make compose-up` avoids it by building and pulling with the engine CLI and running
+  `compose up --no-build`.
+- **uv DNS errors (`failed to lookup address information: Try again`) in a Podman build:** the static musl `uv`
+  binary from `ghcr.io/astral-sh/uv` cannot resolve names through the Podman machine's gvproxy DNS. The Dockerfile installs
+  the glibc `uv` wheel from PyPI instead.
+
+## Verification evidence (Phase 1)
+
+Captured on macOS arm64 with Podman 6.1.4, docker-compose 5.6.1 and `otelcol-contrib` 0.164.0, using `make lint test` (all tests passed),
+`make compose-up` and `make smoke` (all checks passed). The excerpts are trimmed.
+
+**One order produces one distributed trace.** Spans from the Collector `debug` exporter, summarised:
+
+```text
+service  kind    name                  span id           parent            status  http
+order    Server  POST /orders          58b58fd183adcdcf  -                 Unset   201
+order    Client  GET                   7b21e4f4d744dfd8  58b58fd183adcdcf  Unset   200
+user     Server  GET /users/{user_id}  1755ea8347039651  7b21e4f4d744dfd8  Unset   200
+order    Client  POST                  a132c14d92552932  58b58fd183adcdcf  Unset   201
+payment  Server  POST /payments        609b61c699622a6f  a132c14d92552932  Unset   201
+all spans: Trace ID 2457b0718eec21d3fed13d3db2c863ed
+```
+
+The same `trace_id` appears in the stdout JSON logs of all three services (another run, trace `1d0517…eaa8`):
+
+```json
+{"level": "INFO", "logger": "order_service", "message": "order processed", "service.name": "order", "trace_id": "1d05174840da41fe1fb4e34ff667eaa8", "span_id": "25b20f8cf785cfa5", "order.id": "b7ea21b7aef3", "order.status": "confirmed"}
+{"level": "INFO", "logger": "user_service", "message": "user looked up", "service.name": "user", "trace_id": "1d05174840da41fe1fb4e34ff667eaa8", "span_id": "995d5c1aefbf424b", "user.id": "u-1001", "user.status": "active"}
+{"level": "INFO", "logger": "payment_service", "message": "payment processed", "service.name": "payment", "trace_id": "1d05174840da41fe1fb4e34ff667eaa8", "span_id": "8ac5eebf7f681213", "payment.id": "pay-3f40d09efd8b", "order.id": "b7ea21b7aef3", "payment.status": "approved"}
+```
+
+**Metrics in the Collector output** (stable semconv, plus business metrics with exemplars that link to the trace):
+
+```text
+-> Name: http.server.request.duration   -> Unit: s   -> DataType: Histogram
+   http.request.method=GET http.route=/users/{user_id} http.response.status_code=200  Count: 2 Sum: 0.002933
+   ExplicitBounds: 0.005 0.01 0.025 0.05 0.075 0.1 0.25 0.5 0.75 1 2.5 5 7.5 10
+-> Name: orders.created        -> Unit: {order}         -> DataType: Sum        Value: 1  Exemplar Trace ID: 4f7c1579645c3278aea46100839dc37b
+-> Name: payments.processed    -> Unit: {payment}       -> DataType: Sum        result=approved  Value: 1  Exemplar Trace ID: 4f7c1579645c3278aea46100839dc37b
+-> Name: payment.amount        -> Unit: {currency_unit} -> DataType: Histogram  currency=EUR result=approved  Count: 1 Sum: 25.0
+(also http.client.request.duration, http.server.active_requests, http.server.request/response.body.size; no http.server.duration)
+```
+
+**Fault injection** (`PUT payment /admin/faults {"error_rate":1.0}`, then `POST /orders` returns
+`502 {"detail":"payment service returned HTTP 500","upstream":"payment","order_id":"aecbdc446bbb"}`):
+
+```text
+service  kind    name                  status  http  notes
+order    Server  POST /orders          Error   502   error.type=502
+order    Client  GET                   Unset   200
+user     Server  GET /users/{user_id}  Unset   200
+order    Client  POST                  Error   500   error.type=500
+payment  Server  POST /payments        Error   500   event=fault.injected
+all spans: Trace ID 2c210d680d87b4ec128decebb0c7dd55
+```
+
+**Downstream outage:** with Payment stopped, `POST /orders` returns `503 {"detail":"payment service unavailable"}`, while
+Order's `/readyz` stays `200`.
+
+**Graceful shutdown:** `compose stop user-service` while polling every 0.3 s (`SHUTDOWN_DRAIN_SECONDS=2`):
+
+```text
+20:30:08.035 readyz=200 livez=200
+20:30:08.356 readyz=503 livez=200   <- SIGTERM: readiness fails, traffic still served
+...
+20:30:09.978 readyz=503 livez=200
+20:30:10.309 readyz=000 livez=000   <- drain over: listener closed, telemetry flushed, process exits
+```
