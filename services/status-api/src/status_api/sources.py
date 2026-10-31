@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -19,6 +21,15 @@ class SourceError(Exception):
 def _number(raw: str) -> float | None:
     value = float(raw)
     return None if math.isnan(value) or math.isinf(value) else value
+
+
+@contextmanager
+def _payload(kind: str) -> Iterator[None]:
+    """A malformed answer is the source's fault: report it as unavailable, never as a 500."""
+    try:
+        yield
+    except (AttributeError, KeyError, TypeError, ValueError, IndexError) as exc:
+        raise SourceError(f"prometheus: malformed {kind} response") from exc
 
 
 class PrometheusClient:
@@ -41,21 +52,27 @@ class PrometheusClient:
             body = response.json()
         except ValueError as exc:
             raise SourceError(f"prometheus: HTTP {response.status_code}") from exc
+        if not isinstance(body, dict):
+            raise SourceError("prometheus: malformed response")
         if response.status_code != 200 or body.get("status") != "success":
             # Error responses carry {"status": "error", "errorType": ..., "error": ...}.
             if "errorType" not in body:
                 raise SourceError(f"prometheus: HTTP {response.status_code}")
             raise SourceError(f"prometheus: {body.get('errorType', 'error')}")
+        if not isinstance(body.get("data"), dict):
+            raise SourceError("prometheus: malformed response")
         return body["data"]
 
     async def vector(self, query: str, by: str) -> dict[str, float | None]:
         """Instant query; returns {value of label ``by``: sample value}."""
         data = await self._get("/api/v1/query", {"query": query})
-        if data.get("resultType") != "vector":
-            raise SourceError(f"prometheus: expected a vector, got {data.get('resultType')}")
-        return {
-            sample["metric"].get(by, ""): _number(sample["value"][1]) for sample in data["result"]
-        }
+        with _payload("vector"):
+            if data.get("resultType") != "vector":
+                raise SourceError(f"prometheus: expected a vector, got {data.get('resultType')}")
+            return {
+                sample["metric"].get(by, ""): _number(sample["value"][1])
+                for sample in data["result"]
+            }
 
     async def matrix(
         self, query: str, by: str, start: float, end: float, step: int
@@ -65,12 +82,13 @@ class PrometheusClient:
             "/api/v1/query_range",
             {"query": query, "start": f"{start:.0f}", "end": f"{end:.0f}", "step": f"{step}s"},
         )
-        if data.get("resultType") != "matrix":
-            raise SourceError(f"prometheus: expected a matrix, got {data.get('resultType')}")
-        return {
-            series["metric"].get(by, ""): [(int(t), _number(v)) for t, v in series["values"]]
-            for series in data["result"]
-        }
+        with _payload("matrix"):
+            if data.get("resultType") != "matrix":
+                raise SourceError(f"prometheus: expected a matrix, got {data.get('resultType')}")
+            return {
+                series["metric"].get(by, ""): [(int(t), _number(v)) for t, v in series["values"]]
+                for series in data["result"]
+            }
 
 
 class AlertmanagerClient:

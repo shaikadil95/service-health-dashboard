@@ -250,8 +250,8 @@ marks that source `unavailable` instead of failing the request.
 | `GRAFANA_URL` | `http://grafana.localtest.me` |
 
 Run it against the cluster: `kubectl -n observability port-forward svc/kps-prometheus 9090` (and `svc/kps-alertmanager 9093`), then
-`OTEL_TRACES_EXPORTER=none OTEL_METRICS_EXPORTER=none uv run status-api`. Tests (`tests/test_status_api.py`, 32 cases) replace both backends with
-an `httpx.MockTransport`: every rule, unreachable or failing backends (UNKNOWN, never 500), stale data, the cache TTL and single flight,
+`OTEL_TRACES_EXPORTER=none OTEL_METRICS_EXPORTER=none uv run status-api`. Tests (`tests/test_status_api.py`, 37 cases) replace both backends with
+an `httpx.MockTransport`: every rule, unreachable, failing or malformed backends (UNKNOWN, never 500), stale data, the cache TTL and single flight,
 alert matching, and PromQL-injection-safe settings.
 
 The status page that consumes this API is in [`web/`](../web/README.md).

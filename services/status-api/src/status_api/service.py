@@ -150,7 +150,7 @@ class StatusService:
         else:
             self._source_failed(self._am, am_result)
 
-        alerts = [a for a in (_alert(raw, self.settings) for raw in raw_alerts) if a is not None]
+        alerts = [a for a in (self._parse_alert(raw) for raw in raw_alerts) if a is not None]
         alerts.sort(key=lambda a: (a.severity != "critical", a.starts_at))
         generated_at = _now()
         return _Snapshot(
@@ -158,6 +158,13 @@ class StatusService:
             alerts=AlertsResponse(alerts=alerts, source=self._am.out(), generated_at=generated_at),
             taken_at=self.clock(),
         )
+
+    def _parse_alert(self, raw: Any) -> Alert | None:
+        try:
+            return _alert(raw, self.settings)
+        except (AttributeError, TypeError, ValueError) as exc:  # ValidationError is a ValueError
+            logger.warning("skipping malformed alert", extra={"error": str(exc)})
+            return None
 
     @staticmethod
     def _source_failed(state: _SourceState, exc: BaseException) -> None:

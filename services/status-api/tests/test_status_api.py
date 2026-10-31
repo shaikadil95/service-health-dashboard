@@ -251,6 +251,45 @@ def test_prometheus_error_payload_is_unavailable():
     }
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "success"},
+        {"status": "success", "data": {"resultType": "vector", "result": [{"metric": {}}]}},
+        {"status": "success", "data": {"resultType": "vector", "result": [{"value": [1, "x"]}]}},
+        ["not", "an", "object"],
+    ],
+    ids=["no-data", "no-value", "bad-number", "list"],
+)
+def test_malformed_prometheus_payload_is_unknown_not_500(payload):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "alertmanager.test":
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=payload)
+
+    telemetry = in_memory_telemetry("status-api").telemetry
+    app = create_app(telemetry, SETTINGS, transport=httpx.MockTransport(handler))
+    with TestClient(app) as c:
+        response = c.get("/api/v1/services")
+    assert response.status_code == 200
+    assert response.json()["status"] == "UNKNOWN"
+    assert response.json()["sources"]["prometheus"]["status"] == "unavailable"
+
+
+def test_malformed_alerts_are_skipped(client, backends):
+    backends.alerts = [
+        {
+            "labels": {"alertname": "NoStart", "severity": "critical", "service": "user"},
+            "startsAt": "not-a-date",
+        },
+        "garbage",
+        am_alert("HighErrorRate", "critical", service="payment"),
+    ]
+    body = client.get("/api/v1/services").json()
+    assert by_name(body)["user"]["status"] == "UP"
+    assert by_name(body)["payment"]["status"] == "DOWN"
+
+
 def test_critical_alert_still_counts_while_prometheus_is_down(client, backends):
     backends.prometheus_error = httpx.ConnectError("refused")
     backends.alerts = [am_alert("ServiceDown", "critical", service="payment")]
