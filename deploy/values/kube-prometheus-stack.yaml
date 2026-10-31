@@ -129,8 +129,9 @@ alertmanager:
 # --- Grafana -----------------------------------------------------------------------------------
 grafana:
   fullnameOverride: grafana
-  # Dashboards are provisioned as code in Phase 4, deliberately few (Overview + Service Detail).
-  # The ~25 default Kubernetes dashboards of the chart are not installed.
+  # Two dashboards as code (charts/observability-config/dashboards, picked up by the dashboard
+  # sidecar from ConfigMaps labelled grafana_dashboard=1). The ~25 default Kubernetes dashboards
+  # of the chart are not installed.
   defaultDashboardsEnabled: false
   # No PVC: datasources and dashboards are provisioned from ConfigMaps, nothing to keep.
   persistence:
@@ -168,8 +169,14 @@ grafana:
         memory: 128Mi
     datasources:
       url: http://kps-prometheus.observability.svc:9090/
-  # Basic connectivity only. Correlations (exemplars -> traces, logs -> traces, traces -> logs and
-  # metrics, service map) are configured in Phase 4.
+      # Metric -> trace: exemplars carry the trace_id label (OTel SDK -> OTLP -> Prometheus).
+      exemplarTraceIdDestinations:
+        datasourceUid: tempo
+        traceIdLabelName: trace_id
+        urlDisplayLabel: View trace
+  # Correlations between the three signals, all provisioned. Grafana expands $VAR in provisioning
+  # files, so Grafana's own ${...} and $__ macros are written as $${...} / $$__.
+  # https://grafana.com/docs/grafana/latest/datasources/tempo/configure-tempo-data-source/provision/
   additionalDataSources:
     - name: Loki
       uid: loki
@@ -177,12 +184,63 @@ grafana:
       access: proxy
       url: http://loki.observability.svc:3100
       editable: false
+      jsonData:
+        maxLines: 1000
+        # Log -> trace. trace_id is Loki structured metadata (the Collector maps the JSON field to
+        # the log record's trace context), so a "label" matcher is used, not a regex on the line.
+        derivedFields:
+          - name: TraceID
+            matcherType: label
+            matcherRegex: trace_id
+            datasourceUid: tempo
+            url: "$${__value.raw}"
+            urlDisplayLabel: View trace
     - name: Tempo
       uid: tempo
       type: tempo
       access: proxy
       url: http://tempo.observability.svc:3200
       editable: false
+      jsonData:
+        # Trace -> logs: the span's service.name is Loki's service_name stream label; trace_id is
+        # structured metadata, so it is a label filter after the stream selector.
+        tracesToLogsV2:
+          datasourceUid: loki
+          spanStartTimeShift: "-5m"
+          spanEndTimeShift: "5m"
+          tags:
+            - key: service.name
+              value: service_name
+          customQuery: true
+          query: '{$${__tags}} | trace_id="$${__trace.traceId}"'
+        # Trace -> metrics: RED of the span's service from the OTLP HTTP server histogram.
+        tracesToMetrics:
+          datasourceUid: prometheus
+          spanStartTimeShift: "-15m"
+          spanEndTimeShift: "15m"
+          tags:
+            - key: service.name
+              value: service_name
+          queries:
+            - name: Request rate
+              query: 'sum(rate(http_server_request_duration_seconds_count{$$__tags}[$$__rate_interval]))'
+            - name: 5xx ratio
+              query: 'sum(rate(http_server_request_duration_seconds_count{$$__tags, http_response_status_code=~"5.."}[$$__rate_interval])) / sum(rate(http_server_request_duration_seconds_count{$$__tags}[$$__rate_interval]))'
+            - name: p95 latency
+              query: 'histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{$$__tags}[$$__rate_interval])))'
+        # Service map from Tempo's metrics-generator (traces_service_graph_* in Prometheus).
+        serviceMap:
+          datasourceUid: prometheus
+        nodeGraph:
+          enabled: true
+        lokiSearch:
+          datasourceUid: loki
+        search:
+          hide: false
+        traceQuery:
+          timeShiftEnabled: true
+          spanStartTimeShift: "-30m"
+          spanEndTimeShift: "30m"
 
 # --- Exporters ---------------------------------------------------------------------------------
 kube-state-metrics:
