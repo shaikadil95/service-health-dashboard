@@ -1,0 +1,227 @@
+# OpenTelemetry Collector (contrib) as a DaemonSet agent, chart open-telemetry/opentelemetry-collector.
+# Values reference: https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml
+# Topology and reasoning: docs/adr/0002-collector-topology.md.
+#
+# Exactly one path per signal:
+#   traces  apps + Envoy --OTLP--> collector --OTLP gRPC--> Tempo
+#   metrics apps --OTLP--> collector --OTLP/HTTP--> Prometheus (/api/v1/otlp)
+#   logs    apps --stdout JSON--> /var/log/pods --file_log--> collector --OTLP/HTTP--> Loki (/otlp)
+# The services set OTEL_LOGS_EXPORTER=none and the logs pipeline has no OTLP receiver, so a log line
+# cannot arrive twice.
+#
+# Component names follow the Collector's current names (file_log, k8s_attributes, otlp_grpc,
+# otlp_http); the chart would rewrite the deprecated ones (filelog, k8sattributes, otlp, otlphttp).
+fullnameOverride: otel-collector
+mode: daemonset
+
+image:
+  # Same Collector version as compose.yaml (Phase 1).
+  repository: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib
+  tag: 0.164.0
+
+presets:
+  # Tails /var/log/pods through a hostPath mount; read offsets are kept in a hostPath
+  # (/var/lib/otelcol, file_storage extension) so a restarted agent neither re-sends nor skips lines.
+  logsCollection:
+    enabled: true
+    storeCheckpoints: true
+  # RBAC (pods, replicasets, namespaces, nodes) for the k8s_attributes processor configured below.
+  kubernetesAttributes:
+    enabled: true
+
+# Applications reach the agent on their own node: the chart gives the DaemonSet Service
+# internalTrafficPolicy: Local, so otel-collector.observability:4317 never leaves the node.
+# No hostPorts: they would open the receivers on the node IP for everything that can reach the node.
+service:
+  enabled: true
+ports:
+  otlp:
+    enabled: true
+    hostPort: 0
+  otlp-http:
+    enabled: true
+    hostPort: 0
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+  # Self-telemetry (otelcol_*), scraped by Prometheus through the PodMonitor.
+  metrics:
+    enabled: true
+
+podMonitor:
+  enabled: true
+  metricsEndpoints:
+    - port: metrics
+      interval: 30s
+
+config:
+  receivers:
+    # null drops the chart defaults that are not used.
+    jaeger: null
+    zipkin: null
+    prometheus: null
+    otlp:
+      protocols:
+        grpc:
+          endpoint: ${env:MY_POD_IP}:4317
+        http:
+          endpoint: ${env:MY_POD_IP}:4318
+    file_log:
+      # Only the observed services. Platform logs stay available through kubectl logs.
+      # Path format: /var/log/pods/<namespace>_<pod>_<uid>/<container>/<restart>.log
+      include: [/var/log/pods/apps_*/*/*.log]
+      exclude: []
+      start_at: end
+      operators:
+        # CRI log format -> body, stream, time; resource attributes k8s.namespace.name,
+        # k8s.pod.name, k8s.pod.uid, k8s.container.name, k8s.container.restart_count.
+        - type: container
+          id: container-parser
+          max_log_size: 102400
+        # The container parser needs log.file.path (include_file_path, set by the preset) to derive
+        # the k8s.* attributes; afterwards the path adds nothing and is dropped.
+        - type: remove
+          field: attributes["log.file.path"]
+        # The services log one JSON object per line (services/telemetry-lib/.../logs.py):
+        # {"timestamp", "level", "logger", "message", "service.name", "trace_id", "span_id", ...}.
+        # Map them to the OTel log data model instead of leaving them as text: timestamp,
+        # severity and trace context become LogRecord fields, which Loki stores as trace_id/span_id.
+        - type: json_parser
+          id: app-json
+          if: 'body matches "^\\s*\\{"'
+          parse_from: body
+          parse_to: attributes
+          timestamp:
+            parse_from: attributes.timestamp
+            layout_type: gotime
+            layout: "2006-01-02T15:04:05.000Z07:00"
+          severity:
+            parse_from: attributes.level
+            mapping:
+              warn: [warn, warning]
+              fatal: [fatal, critical]
+          trace:
+            trace_id:
+              parse_from: attributes.trace_id
+            span_id:
+              parse_from: attributes.span_id
+        - type: move
+          if: attributes.message != nil
+          from: attributes.message
+          to: body
+        # Now redundant: they are LogRecord fields (or the resource's service.name).
+        - type: remove
+          if: attributes.timestamp != nil
+          field: attributes.timestamp
+        - type: remove
+          if: attributes.level != nil
+          field: attributes.level
+        - type: remove
+          if: attributes.trace_id != nil
+          field: attributes.trace_id
+        - type: remove
+          if: attributes.span_id != nil
+          field: attributes.span_id
+        - type: remove
+          if: attributes["service.name"] != nil
+          field: attributes["service.name"]
+
+  processors:
+    # First in every pipeline: refuses data before the agent runs out of memory. The chart sets
+    # GOMEMLIMIT from the container limit (useGOMEMLIMIT).
+    memory_limiter:
+      check_interval: 1s
+      limit_percentage: 80
+      spike_limit_percentage: 25
+    # Pod metadata. Logs are associated by k8s.pod.uid (from the file path), OTLP data by the
+    # k8s.pod.uid the services send, Envoy spans by the connection's source IP.
+    k8s_attributes:
+      filter:
+        node_from_env_var: K8S_NODE_NAME
+      passthrough: false
+      pod_association:
+        - sources:
+            - from: resource_attribute
+              name: k8s.pod.uid
+        - sources:
+            - from: resource_attribute
+              name: k8s.pod.ip
+        - sources:
+            - from: connection
+      extract:
+        # service.name from the pod (annotation resource.opentelemetry.io/service.name, else the
+        # app.kubernetes.io labels), so log lines get the same service.name as traces and metrics.
+        otel_annotations: true
+        metadata:
+          - k8s.namespace.name
+          - k8s.pod.name
+          - k8s.pod.uid
+          - k8s.node.name
+          - k8s.deployment.name
+          - service.name
+    resource:
+      attributes:
+        - key: deployment.environment.name
+          value: kind
+          action: insert
+        - key: k8s.cluster.name
+          value: shd
+          action: insert
+    batch:
+      send_batch_size: 1024
+      timeout: 2s
+
+  exporters:
+    debug: null
+    otlp_http/prometheus:
+      # The exporter appends /v1/metrics.
+      endpoint: http://kps-prometheus.observability.svc:9090/api/v1/otlp
+    otlp_grpc/tempo:
+      endpoint: tempo.observability.svc:4317
+      tls:
+        insecure: true
+    otlp_http/loki:
+      # The exporter appends /v1/logs.
+      endpoint: http://loki.observability.svc:3100/otlp
+
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, k8s_attributes, resource, batch]
+        exporters: [otlp_grpc/tempo]
+      metrics:
+        receivers: [otlp]
+        processors: [memory_limiter, k8s_attributes, resource, batch]
+        exporters: [otlp_http/prometheus]
+      logs:
+        receivers: [file_log]
+        processors: [memory_limiter, k8s_attributes, resource, batch]
+        exporters: [otlp_http/loki]
+
+# Root is needed to read /var/log/pods (root-owned, 0640) and write the offsets hostPath; no
+# capabilities, no privilege escalation, read-only root filesystem.
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  runAsNonRoot: false
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
+
+# Measured 70-220 MiB working set (higher after a start while backends were still down and the
+# exporters' retry queues filled). memory_limiter refuses data at 80 % of the limit.
+resources:
+  requests:
+    cpu: 50m
+    memory: 192Mi
+  limits:
+    memory: 512Mi

@@ -19,6 +19,19 @@ spec:
         - port: http
           protocol: TCP
     {{- end }}
+    {{- with .Values.networkPolicy.blackboxExporter }}
+    {{- if .enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .namespace }}
+          podSelector:
+            {{- toYaml .podSelector | nindent 12 }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- end }}
+    {{- end }}
   egress:
     {{- with .Values.networkPolicy.egress }}
     {{- toYaml . | nindent 4 }}

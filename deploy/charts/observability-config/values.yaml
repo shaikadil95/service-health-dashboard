@@ -1,0 +1,44 @@
+gateway:
+  parentRef:
+    name: edge
+    namespace: envoy-gateway-system
+    sectionName: http
+
+# UIs behind the edge Gateway. Until Phase 6 adds SSO they have no authentication besides Grafana's
+# own login, and on Podman/macOS the gateway listens on all interfaces (deploy/README.md).
+routes:
+  - name: grafana
+    hostname: grafana.localtest.me
+    service: grafana
+    port: 80
+    blockedPathPrefixes: []
+  - name: prometheus
+    hostname: prometheus.localtest.me
+    service: kps-prometheus
+    port: 9090
+    # Write and lifecycle endpoints stay cluster-internal: OTLP and remote-write receivers are on
+    # for the Collector and Tempo, and the Operator enables /-/reload and /-/quit for its reloader.
+    blockedPathPrefixes: [/api/v1/otlp, /api/v1/write, /-/reload, /-/quit]
+  - name: alertmanager
+    hostname: alertmanager.localtest.me
+    service: kps-alertmanager
+    port: 9093
+    blockedPathPrefixes: [/-/reload, /-/quit]
+
+# Blackbox HTTP probes of each service's /readyz through its in-cluster Service URL.
+probes:
+  prober: blackbox-exporter.observability.svc:9115
+  module: http_2xx
+  interval: 15s
+  scrapeTimeout: 10s
+  targets:
+    user: http://user.apps.svc.cluster.local/readyz
+    order: http://order.apps.svc.cluster.local/readyz
+    payment: http://payment.apps.svc.cluster.local/readyz
+
+# Envoy proxy metrics (/stats/prometheus on the "metrics" container port) of the edge Gateway.
+envoyPodMonitor:
+  enabled: true
+  namespace: envoy-gateway-system
+  gatewayName: edge
+  interval: 30s

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-script
+  labels:
+    app.kubernetes.io/name: loadgen
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/part-of: service-health-dashboard
+data:
+  orders.js: |
+    {{- .Files.Get "scripts/orders.js" | nindent 4 }}

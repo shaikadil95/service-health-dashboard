@@ -117,7 +117,8 @@ spec:
             - name: OTEL_METRICS_EXPORTER
               value: none
             {{- end }}
-            # Logs go to stdout as JSON; the Collector's filelog receiver collects them (Phase 3).
+            # Logs go to stdout as JSON and the Collector tails them (file_log receiver); exporting them
+            # over OTLP as well would store every line twice.
             - name: OTEL_LOGS_EXPORTER
               value: none
             {{- range $k, $v := .Values.env }}

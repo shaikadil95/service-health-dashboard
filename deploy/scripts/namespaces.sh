@@ -11,6 +11,11 @@ declare -a namespaces=(
   "apps=restricted"
   # The Envoy proxy pods meet "restricted"; the controller's cert-gen Job also does.
   "envoy-gateway-system=restricted"
+  # The node agents need host access: the OTel Collector reads /var/log/pods (hostPath) and
+  # node-exporter uses the host network and PID namespaces. Everything else in the namespace
+  # sets its own restricted-style securityContext.
+  "observability=privileged"
+  "loadgen=restricted"
 )
 
 for entry in "${namespaces[@]}"; do

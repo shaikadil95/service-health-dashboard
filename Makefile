@@ -1,5 +1,6 @@
 # Service Health Dashboard. Run `make help` for targets.
 # Phase 1: services (uv, compose). Phase 2: local Kubernetes platform (kind, Helm, helmfile).
+# Phase 3: telemetry pipeline and storage (Collector, Prometheus, Loki, Tempo, Grafana, k6).
 
 SHELL := /usr/bin/env bash
 .SHELLFLAGS := -euo pipefail -c
@@ -165,12 +166,24 @@ $(CACHE_DIR)/docker-config/config.json:
 .PHONY: deploy
 deploy: $(CACHE_DIR)/docker-config/config.json ## Install or upgrade all releases (helmfile apply) and configure CoreDNS
 	$(SCRIPT_ENV) deploy/scripts/namespaces.sh
+	$(SCRIPT_ENV) deploy/scripts/grafana-admin-secret.sh
 	$(HELM_ENV) $(HELMFILE) --file deploy/helmfile.yaml apply --suppress-diff
 	$(KUBECTL_KIND) -n envoy-gateway-system wait --for=condition=Programmed gateway/edge --timeout=300s
 	$(SCRIPT_ENV) deploy/scripts/coredns-localtest.sh
 
+# Third-party images referenced by the rendered releases. Images of Helm test pods and of features
+# that are switched off (Envoy rate limit, Thanos sidecar) are not needed.
+PLATFORM_IMAGE_REGEX := (docker\.io|quay\.io|ghcr\.io|registry\.k8s\.io)/[A-Za-z0-9./_-]+(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]+)?
+PLATFORM_IMAGE_SKIP := /bats/|/ratelimit:|/thanos:
+
+.PHONY: platform-images
+platform-images: $(CACHE_DIR)/docker-config/config.json ## Pull the stack's images with the engine (parallel) and load them into kind
+	$(HELM_ENV) $(HELMFILE) --file deploy/helmfile.yaml template 2>/dev/null \
+	  | grep -oE '$(PLATFORM_IMAGE_REGEX)' | grep -vE '$(PLATFORM_IMAGE_SKIP)' \
+	  | ENGINE=$(ENGINE) KIND=$(KIND) CLUSTER_NAME=$(CLUSTER_NAME) CACHE_DIR=$(CACHE_DIR) deploy/scripts/preload-images.sh
+
 .PHONY: up
-up: cluster-up images deploy status ## Create the cluster, load the images and deploy everything
+up: cluster-up images platform-images deploy status ## Create the cluster, load the images and deploy everything
 
 .PHONY: down
 down: cluster-down ## Delete the cluster and everything in it
@@ -186,15 +199,32 @@ status: ## Show nodes, gateway, routes and workloads
 	@echo; $(KUBECTL_KIND) get gateway,httproute -A
 	@echo; $(KUBECTL_KIND) -n envoy-gateway-system get deploy,svc
 	@echo; $(KUBECTL_KIND) -n apps get deploy,pods,svc,networkpolicy
+	@echo; $(KUBECTL_KIND) -n observability get pods,pvc
+	@echo; $(KUBECTL_KIND) -n loadgen get deploy
 	@echo; echo "API: http://api.localtest.me/orders  (POST/GET), http://api.localtest.me/users/u-1001"
+	@echo "UIs: http://grafana.localtest.me (admin, password: make grafana-password), http://prometheus.localtest.me, http://alertmanager.localtest.me"
+
+.PHONY: grafana-password
+grafana-password: ## Print the generated Grafana admin password (user: admin)
+	@$(KUBECTL_KIND) -n observability get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
+
+.PHONY: load-start
+load-start: ## Start the k6 load generator (steady order traffic through the gateway)
+	$(KUBECTL_KIND) -n loadgen scale deployment/loadgen --replicas=1
+	$(KUBECTL_KIND) -n loadgen rollout status deployment/loadgen --timeout=120s
+
+.PHONY: load-stop
+load-stop: ## Stop the k6 load generator
+	$(KUBECTL_KIND) -n loadgen scale deployment/loadgen --replicas=0
 
 .PHONY: verify
-verify: verify-image ## Automated Phase 2 checks against the running cluster
+verify: verify-image ## Automated platform (Phase 2) and telemetry (Phase 3) checks against the running cluster
 	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify.sh
+	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) deploy/scripts/verify-telemetry.sh
 
 .PHONY: lint-charts
 lint-charts: ## helm lint and render the local charts with every values file
-	helm lint --strict deploy/charts/edge deploy/charts/namespace-baseline
+	helm lint --strict deploy/charts/edge deploy/charts/namespace-baseline deploy/charts/observability-config loadgen
 	@for svc in user order payment; do \
 	  helm lint --strict deploy/charts/microservice -f deploy/values/$$svc.yaml && \
 	  helm template $$svc deploy/charts/microservice -n apps -f deploy/values/$$svc.yaml > /dev/null || exit 1; \
