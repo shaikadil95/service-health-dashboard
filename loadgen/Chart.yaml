@@ -1,0 +1,8 @@
+apiVersion: v2
+name: loadgen
+description: >-
+  k6 load generator: steady, low-rate order traffic through the edge Gateway
+  (scripts/orders.js), so the dashboards and alerts always have data.
+type: application
+version: 0.1.0
+appVersion: "2.3.0"

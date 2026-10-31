@@ -1,0 +1,24 @@
+# k6 (https://grafana.com/docs/k6/latest/) running scripts/orders.js in the cluster.
+# `make load-stop` / `make load-start` scale the Deployment to 0 / 1 replicas.
+replicas: 1
+
+image:
+  repository: docker.io/grafana/k6
+  tag: 2.3.0
+  pullPolicy: IfNotPresent
+
+# Same URL as from the host: the CoreDNS rewrite sends *.localtest.me to the edge Gateway.
+baseUrl: http://api.localtest.me
+# Iterations per second; each makes 2-3 requests at the edge (POST order, GET order, sometimes
+# GET user), i.e. about 4-5 requests per second at the gateway.
+rate: 2
+# One long run instead of daily restarts that would look like crash loops.
+duration: 8760h
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
