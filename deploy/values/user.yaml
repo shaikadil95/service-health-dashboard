@@ -1,0 +1,23 @@
+# User service: public GET /users/{id} through the gateway; also called by order.
+image:
+  repository: localhost/shd/user-service
+
+networkPolicy:
+  ingressFrom:
+    # Envoy data-plane pods of the edge Gateway.
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: envoy
+          app.kubernetes.io/component: proxy
+          gateway.envoyproxy.io/owning-gateway-name: edge
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: order
+
+httpRoute:
+  enabled: true
+  hostnames: [api.localtest.me]
+  pathPrefixes: [/users]

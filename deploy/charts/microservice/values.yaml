@@ -1,0 +1,128 @@
+# Defaults for one service. Per-service overrides live in deploy/values/<service>.yaml.
+
+# Name of the workload, Service and OTel service.name. Defaults to the release name.
+nameOverride: ""
+
+image:
+  repository: localhost/shd/user-service
+  tag: dev
+  # The images are loaded into the kind node (`make images`), never pulled from a registry.
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+revisionHistoryLimit: 3
+
+containerPort: 8080
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Extra environment variables (name: value), e.g. upstream URLs.
+env: {}
+
+logLevel: INFO
+
+# Fault injection defaults (see services/README.md). /admin/faults can change them at runtime.
+faults:
+  errorRate: "0"
+  latencyMs: "0"
+  ready: "true"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# /livez only proves the event loop responds and never checks dependencies, so a dependency outage
+# cannot cause restarts. /readyz fails while starting, draining or when forced by fault injection,
+# which removes the pod from the Service endpoints without restarting it.
+probes:
+  startup:
+    path: /livez
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 30 # up to 60 s to boot; liveness only starts after this succeeds
+  liveness:
+    path: /livez
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 2
+    successThreshold: 1
+
+# Graceful shutdown. Order of events on pod deletion:
+#   1. preStop sleep: endpoint removal propagates to kube-proxy and Envoy while the pod still serves.
+#   2. SIGTERM: the service fails /readyz and keeps serving for drainSeconds, then stops accepting
+#      connections and waits up to timeoutSeconds for in-flight requests (shd_telemetry.server).
+# terminationGracePeriodSeconds must exceed preStop + drain + timeout.
+shutdown:
+  preStopSleepSeconds: 5
+  drainSeconds: 3
+  timeoutSeconds: 10
+  terminationGracePeriodSeconds: 25
+
+otel:
+  # deployment.environment.name resource attribute.
+  environment: kind
+  # The OTel Collector arrives in Phase 3. Until then traces and metrics are not exported
+  # (OTEL_*_EXPORTER=none), which avoids a stream of connection errors in the logs.
+  exporter:
+    enabled: false
+    endpoint: ""
+    protocol: grpc
+  metricExportIntervalMs: 15000
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop: [ALL]
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Ingress and egress rules for this service's pods. The namespace-baseline chart provides the
+# default-deny policy and DNS egress; these rules only add what this service needs.
+networkPolicy:
+  enabled: true
+  # NetworkPolicyPeers allowed to reach containerPort.
+  ingressFrom: []
+  # NetworkPolicyEgressRules (to + ports).
+  egress: []
+  # OTLP egress to the OTel Collector. Pre-provisioned for Phase 3; enable together with
+  # otel.exporter.enabled once the Collector runs.
+  otelCollector:
+    enabled: false
+    namespace: observability
+    podSelector: {}
+    ports: [4317, 4318]
+
+# Gateway API HTTPRoute that exposes selected path prefixes through the shared edge Gateway.
+httpRoute:
+  enabled: false
+  parentRefs:
+    - name: edge
+      namespace: envoy-gateway-system
+      sectionName: http
+  hostnames: []
+  pathPrefixes: []

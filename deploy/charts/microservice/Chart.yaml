@@ -1,0 +1,13 @@
+apiVersion: v2
+name: microservice
+description: >-
+  Generic chart for the instrumented FastAPI services (user, order, payment): Deployment with
+  startup/liveness/readiness probes, hardened security context, graceful shutdown, OpenTelemetry
+  environment, Service, NetworkPolicy and an optional Gateway API HTTPRoute.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.33.0-0"
+home: https://github.com/shaikadil95/service-health-dashboard
+sources:
+  - https://github.com/shaikadil95/service-health-dashboard/tree/main/services
