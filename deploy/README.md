@@ -543,6 +543,84 @@ In the service graph, `user->gateway` and `user->user` are Tempo's **virtual cli
 `user`: requests whose caller sends no spans (k6 and curl at the edge, `kubectl port-forward` calls to `/admin/faults`
 in `verify.sh`). They are not the User service.
 
+### Phase 4 evidence
+
+[`scripts/verify-status.sh`](scripts/verify-status.sh) runs last in `make verify`. It checks the status page and the documented JSON
+through the gateway, the NetworkPolicies from a pod outside `apps`, both dashboards through Grafana's API (every Prometheus query of
+the Overview has data for all three services, every panel of Service Detail including the logs panel has data for each service),
+and the correlations by following them: an exemplar of the p95 panel to its trace in Tempo, a Loki line's `trace_id` to its trace,
+the trace-to-logs query back to Loki, and the service-graph metrics behind the service map. Final run from scratch
+(`make down && make up && make verify`, Podman 6.1.4, macOS arm64): `make up` 429 s, `make verify` 290 s,
+**Phase 2: 30 passed, Phase 3: 36 passed, Phase 4: 27 passed, 0 failed**. The Phase 4 part:
+
+```text
+== 1. Status workloads
+  PASS  deployment apps/status-api available
+  PASS  deployment apps/status-web available
+== 2. Status page and Status API (http://status.localtest.me)
+  PASS  GET / (status page) -> 200 text/html
+  PASS  index.html is the status page
+  PASS  GET /services/payment (SPA fallback) -> 200 text/html
+  PASS  GET /assets/index-Dq5nv3id.js (hashed asset, long-lived cache) -> public, max-age=31536000, immutable
+  PASS  GET /api/v1/services matches the contract -> keys, sources ok, metrics and series for user/order/payment
+  PASS  all three services UP -> overall=UP user=UP order=UP payment=UP
+  PASS  GET /api/v1/services/payment -> 200 payment
+  PASS  GET /api/v1/services/unknown -> 404
+  PASS  GET /api/v1/alerts -> 200 ok
+  PASS  GET /admin/faults is not the Status API (served by the page) -> text/html
+  PASS  GET /docs is not the Status API (served by the page) -> text/html
+  PASS  GET /openapi.json is not the Status API (served by the page) -> text/html
+  PASS  GET /api/../admin/faults is not the Status API (served by the page) -> text/html
+  PASS  PUT /admin/faults (not routed to the API) -> 405
+== 3. NetworkPolicy (namespace netcheck-status, outside apps)
+  PASS  pod outside apps -> status-api.apps directly (blocked) -> 000
+  PASS  pod outside apps -> status-web.apps directly (blocked) -> 000
+  PASS  pod: GET http://status.localtest.me/api/v1/services via the gateway -> 200
+  PASS  status-api -> Prometheus 9090 and Alertmanager 9093 allowed (both sources ok above)
+== 4. Grafana dashboards (via http://grafana.localtest.me)
+  PASS  dashboards provisioned (sidecar): Service Health Overview, Service Detail -> Service Detail (7 panels); Service Health Overview (5 panels)
+  PASS  Overview: every panel has data for all three services -> data for user/order/payment in: Status, Request rate, Error % (5xx), p95 latency
+  PASS  Service Detail: every panel has data for each service -> all panels (incl. logs) have data for user/order/payment
+== 5. Correlations
+  PASS  datasource correlation settings (provisioned, macros not expanded) -> exemplars->tempo, loki trace_id->tempo, tempo->loki/prometheus, service map, node graph
+  PASS  exemplar on the p95 panel -> trace in Tempo -> trace_id b8786953191dee761f858d42275fdf57: 7 spans in Tempo
+  PASS  log line -> trace (derived field) -> logs of another service (traces to logs) -> trace_id b4208fa803efbe466ac22a74f65bddc2 (payment log line) -> Tempo services ['gateway', 'order', 'payment', 'user'] -> 2 order log lines
+  PASS  service map metrics (Tempo service graph) for the Tempo datasource -> gateway->order order->payment order->user
+
+verify-status: 27 passed, 0 failed
+```
+
+**Fault test** (k6 running, faults set with `kubectl port-forward` + `PUT /admin/faults`, Status API and the Overview's status query
+polled every 5 s; both always agreed):
+
+| Fault | Status API and Overview | After reset |
+|---|---|---|
+| Payment `error_rate=0.5` | payment `DEGRADED` after **41 s** (5xx 5.6%), order `DEGRADED` after **62 s** (its `POST /orders` return 502); peak 5xx ratio ≈ 50% payment / 35% order on the Error % panel | order `UP` after 242 s, payment after 263 s |
+| User `latency_ms=800` | user `DEGRADED` after **31 s** (p95 872 ms); order follows (it waits for user: p95 940 ms) | order `UP` after 269 s, user after 290 s |
+
+Detection within about one minute is the exit criterion. Recovery takes about five minutes on purpose: the status uses the
+5-minute windows of the alert rules, so the page and the on-call email (Phase 5) never disagree, and a short dip does not flap.
+The sparklines use 1-minute windows and show the recovery first. The Overview screenshot in
+[Visualization and status page](#visualization-and-status-page-phase-4) was taken during the User fault, with the earlier Payment
+error spike still in the 30-minute window; the status page screenshot is in [`../web/README.md`](../web/README.md).
+
+**Resources:** status-api 50 MiB, status-web (nginx) 5 MiB working set; images 200 MB (Python) and 63 MB (nginx).
+
+**Phase 4 deviations from the plan**
+
+- **Dashboards in `charts/observability-config/dashboards/`**, not `deploy/dashboards/`: Helm only reads files inside a chart
+  (`.Files.Glob`), and that chart already owns the other observability resources.
+- **Status rule thresholds**: 5xx > 5% (the `HighErrorRate` threshold); the architecture document said 1%, which would have
+  contradicted the alert. A fourth status `UNKNOWN` covers a missing data source. Both are noted in ADR 0006.
+- **Overview "firing alerts" is a Prometheus `ALERTS` table**, not Grafana's alert list panel, which lists Grafana-managed rules;
+  the project's rules are Prometheus rules (Phase 5). The Status API reads Alertmanager instead (silences and inhibition applied).
+- **Status API uses `/api/v1/query_range` too**, for the sparkline series, besides `/api/v1/query`.
+- **`microservice` chart**: `shdRuntime` and `tmpVolume` values so that the nginx image reuses the chart; the three services render
+  unchanged.
+- **shadcn CLI and TLS**: the CLI's HTTP client rejected `ui.shadcn.com`'s certificate chain with Node's bundled CA store; it ran with
+  `NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem` (macOS system CAs). The `--monorepo` scaffold uses turbo; the app was renamed from
+  `apps/web` to `apps/status`.
+
 ## Troubleshooting
 
 **First `make up` takes long, or Helm times out waiting for observability pods.** The kubelet pulls images one at a time;
