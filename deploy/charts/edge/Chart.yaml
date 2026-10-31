@@ -1,0 +1,8 @@
+apiVersion: v2
+name: edge
+description: >-
+  Shared edge for the local platform: an Envoy Gateway EnvoyProxy (NodePort Service for the kind
+  port mappings), the GatewayClass and the Gateway that application HTTPRoutes attach to.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

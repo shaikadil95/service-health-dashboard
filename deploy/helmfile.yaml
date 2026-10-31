@@ -1,0 +1,60 @@
+# Releases of the local platform. `make deploy` runs `helmfile apply` after creating the namespaces
+# and before patching CoreDNS (see deploy/README.md). Requires Helm 4 and the helm-diff plugin.
+# Later phases add releases to the "observability" namespace (Collector, kube-prometheus-stack,
+# Loki, Tempo, ...) in the same way: one release per component, ordered with `needs`.
+
+helmDefaults:
+  kubeContext: kind-shd
+  wait: true
+  waitForJobs: true
+  timeout: 300
+  createNamespace: true
+
+releases:
+  # --- Edge -------------------------------------------------------------------------------------
+  - name: envoy-gateway
+    namespace: envoy-gateway-system
+    chart: oci://docker.io/envoyproxy/gateway-helm
+    version: v1.9.3
+    labels: { tier: edge }
+    values:
+      - values/envoy-gateway.yaml
+
+  - name: edge
+    namespace: envoy-gateway-system
+    chart: ./charts/edge
+    labels: { tier: edge }
+    # Its CRs (EnvoyProxy, GatewayClass, Gateway) use CRDs that the envoy-gateway release installs,
+    # so on a fresh cluster helm-diff must not validate them against the API server yet.
+    disableValidationOnInstall: true
+    needs:
+      - envoy-gateway-system/envoy-gateway
+
+  # --- Applications (namespace "apps") ---------------------------------------------------------
+  - name: apps-baseline
+    namespace: apps
+    chart: ./charts/namespace-baseline
+    labels: { tier: apps }
+
+  - name: user
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/apps-baseline]
+    disableValidationOnInstall: true # HTTPRoute CRD comes from the envoy-gateway release
+    values: [values/user.yaml]
+
+  - name: payment
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [apps/apps-baseline]
+    values: [values/payment.yaml]
+
+  - name: order
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/user, apps/payment]
+    disableValidationOnInstall: true
+    values: [values/order.yaml]
