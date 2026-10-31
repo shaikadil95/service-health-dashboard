@@ -72,11 +72,13 @@ shutdown:
 otel:
   # deployment.environment.name resource attribute.
   environment: kind
-  # The OTel Collector arrives in Phase 3. Until then traces and metrics are not exported
-  # (OTEL_*_EXPORTER=none), which avoids a stream of connection errors in the logs.
+  # Traces and metrics go over OTLP/gRPC to the OTel Collector agent on the same node: the
+  # Collector's DaemonSet Service has internalTrafficPolicy: Local (docs/adr/0002). Logs are not
+  # exported over OTLP; the Collector tails stdout instead. With enabled: false the SDK exporters
+  # are switched off (OTEL_*_EXPORTER=none), e.g. for a cluster without the observability stack.
   exporter:
-    enabled: false
-    endpoint: ""
+    enabled: true
+    endpoint: http://otel-collector.observability.svc.cluster.local:4317
     protocol: grpc
   metricExportIntervalMs: 15000
 
@@ -109,13 +111,23 @@ networkPolicy:
   ingressFrom: []
   # NetworkPolicyEgressRules (to + ports).
   egress: []
-  # OTLP egress to the OTel Collector. Pre-provisioned for Phase 3; enable together with
-  # otel.exporter.enabled once the Collector runs.
+  # OTLP egress to the OTel Collector pods (keep in sync with otel.exporter). NetworkPolicy sees
+  # the pod IP after the Service translation, so the pod selector matches the agent pods.
   otelCollector:
-    enabled: false
+    enabled: true
     namespace: observability
-    podSelector: {}
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: opentelemetry-collector
+        app.kubernetes.io/instance: otel-collector
     ports: [4317, 4318]
+  # Ingress from the blackbox exporter, which probes /readyz through the Service (synthetic check).
+  blackboxExporter:
+    enabled: true
+    namespace: observability
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: prometheus-blackbox-exporter
 
 # Gateway API HTTPRoute that exposes selected path prefixes through the shared edge Gateway.
 httpRoute:

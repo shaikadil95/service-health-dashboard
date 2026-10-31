@@ -17,13 +17,25 @@ envoyProxy:
       memory: 128Mi
     limits:
       memory: 512Mi
+  telemetry:
+    tracing:
+      enabled: true
+      # Every request is traced (laptop traffic). service.name of the gateway spans.
+      samplingRate: 100
+      serviceName: gateway
+      # The node-local OTel Collector (OTLP gRPC). The Service declares appProtocol: grpc, which
+      # Envoy needs to pick gRPC.
+      backendRefs:
+        - name: otel-collector
+          namespace: observability
+          port: 4317
 
 gateway:
   listeners:
     http:
       port: 80
   # Namespaces whose HTTPRoutes may attach to the Gateway.
-  routeNamespaces: [apps]
+  routeNamespaces: [apps, observability]
 
 backends:
   # 0 disables Envoy's panic mode, so endpoints that are not ready never receive traffic.

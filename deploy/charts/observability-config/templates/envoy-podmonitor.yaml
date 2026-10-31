@@ -1,0 +1,22 @@
+{{- with .Values.envoyPodMonitor }}
+{{- if .enabled }}
+# Envoy proxy pods that Envoy Gateway creates for the Gateway. They expose Prometheus metrics on the
+# "metrics" container port (19001); the EnvoyProxy telemetry settings live in charts/edge.
+# https://gateway.envoyproxy.io/docs/tasks/observability/proxy-metric/
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: envoy-proxy-{{ .gatewayName }}
+  namespace: {{ .namespace }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: envoy
+      app.kubernetes.io/component: proxy
+      gateway.envoyproxy.io/owning-gateway-name: {{ .gatewayName }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /stats/prometheus
+      interval: {{ .interval }}
+{{- end }}
+{{- end }}

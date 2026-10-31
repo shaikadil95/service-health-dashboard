@@ -1,0 +1,25 @@
+{{- $p := .Values.probes -}}
+{{- range $service, $url := $p.targets }}
+# Synthetic check: Prometheus asks the blackbox exporter to GET the URL and records probe_success,
+# probe_http_status_code and probe_duration_seconds with the label service="{{ $service }}".
+# https://prometheus-operator.dev/docs/api-reference/api/#monitoring.coreos.com/v1.Probe
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: {{ $service }}-readyz
+spec:
+  jobName: blackbox-readyz
+  module: {{ $p.module }}
+  interval: {{ $p.interval }}
+  scrapeTimeout: {{ $p.scrapeTimeout }}
+  prober:
+    url: {{ $p.prober }}
+  targets:
+    staticConfig:
+      static:
+        - {{ $url }}
+      labels:
+        service: {{ $service }}
+        namespace: apps
+---
+{{- end }}
