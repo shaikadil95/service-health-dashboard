@@ -263,3 +263,6 @@ web/**/dist/
 # Web monorepo (web/): node_modules, dist and .turbo are covered above and in web/.gitignore.
 # The Python "lib/" rule above must not hide the TypeScript source folders.
 !web/**/src/lib/
+
+# Local-only documents (ADRs, roadmap, verification evidence); kept outside the public repository
+internal-docs/

@@ -1,6 +1,6 @@
 # Web frontends (pnpm monorepo)
 
-React, TypeScript, Vite, Tailwind CSS and [shadcn/ui](https://ui.shadcn.com/docs/installation/vite) ([ADR 0006](../docs/adr/0006-status-api-bff-and-status-page.md)).
+React, TypeScript, Vite, Tailwind CSS and [shadcn/ui](https://ui.shadcn.com/docs/installation/vite).
 Scaffolded with the official CLI, `shadcn@4.23.0 init -t vite --monorepo -b radix -p nova`, and built with turbo.
 
 | Path | What |

@@ -78,7 +78,7 @@ otel:
   # deployment.environment.name resource attribute.
   environment: kind
   # Traces and metrics go over OTLP/gRPC to the OTel Collector agent on the same node: the
-  # Collector's DaemonSet Service has internalTrafficPolicy: Local (docs/adr/0002). Logs are not
+  # Collector's DaemonSet Service has internalTrafficPolicy: Local (deploy/README.md). Logs are not
   # exported over OTLP; the Collector tails stdout instead. With enabled: false the SDK exporters
   # are switched off (OTEL_*_EXPORTER=none), e.g. for a cluster without the observability stack.
   exporter:

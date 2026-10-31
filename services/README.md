@@ -180,8 +180,8 @@ the [standard `OTEL_*` variables](https://opentelemetry.io/docs/specs/otel/confi
 
 ## Status API
 
-`status-api/` is the backend for frontend of the status page ([ADR 0006](../docs/adr/0006-status-api-bff-and-status-page.md),
-[architecture §8](../docs/architecture.md#8-status-api-contract)). It uses `shd_telemetry` like the other services (OTel traces and
+`status-api/` is the backend for frontend of the status page
+([architecture §8](../docs/architecture.md#8-status-api-contract)). It uses `shd_telemetry` like the other services (OTel traces and
 metrics, JSON logs, `/livez`, `/readyz`, graceful shutdown), queries the
 [Prometheus HTTP API](https://prometheus.io/docs/prometheus/latest/querying/api/) (`/api/v1/query`, `/api/v1/query_range`) and the
 [Alertmanager v2 API](https://github.com/prometheus/alertmanager/blob/main/api/v2/openapi.yaml) (`/api/v2/alerts?active=true&silenced=false&inhibited=false`)
@@ -291,66 +291,3 @@ semantics (including readiness while draining), the mapping of upstream failures
 - **uv DNS errors (`failed to lookup address information: Try again`) in a Podman build:** the static musl `uv`
   binary from `ghcr.io/astral-sh/uv` cannot resolve names through the Podman machine's gvproxy DNS. The Dockerfile installs
   the glibc `uv` wheel from PyPI instead.
-
-## Verification evidence (Phase 1)
-
-Captured on macOS arm64 with Podman 6.1.4, docker-compose 5.6.1 and `otelcol-contrib` 0.164.0, using `make lint test` (all tests passed),
-`make compose-up` and `make smoke` (all checks passed). The excerpts are trimmed.
-
-**One order produces one distributed trace.** Spans from the Collector `debug` exporter, summarised:
-
-```text
-service  kind    name                  span id           parent            status  http
-order    Server  POST /orders          58b58fd183adcdcf  -                 Unset   201
-order    Client  GET                   7b21e4f4d744dfd8  58b58fd183adcdcf  Unset   200
-user     Server  GET /users/{user_id}  1755ea8347039651  7b21e4f4d744dfd8  Unset   200
-order    Client  POST                  a132c14d92552932  58b58fd183adcdcf  Unset   201
-payment  Server  POST /payments        609b61c699622a6f  a132c14d92552932  Unset   201
-all spans: Trace ID 2457b0718eec21d3fed13d3db2c863ed
-```
-
-The same `trace_id` appears in the stdout JSON logs of all three services (another run, trace `1d0517…eaa8`):
-
-```json
-{"level": "INFO", "logger": "order_service", "message": "order processed", "service.name": "order", "trace_id": "1d05174840da41fe1fb4e34ff667eaa8", "span_id": "25b20f8cf785cfa5", "order.id": "b7ea21b7aef3", "order.status": "confirmed"}
-{"level": "INFO", "logger": "user_service", "message": "user looked up", "service.name": "user", "trace_id": "1d05174840da41fe1fb4e34ff667eaa8", "span_id": "995d5c1aefbf424b", "user.id": "u-1001", "user.status": "active"}
-{"level": "INFO", "logger": "payment_service", "message": "payment processed", "service.name": "payment", "trace_id": "1d05174840da41fe1fb4e34ff667eaa8", "span_id": "8ac5eebf7f681213", "payment.id": "pay-3f40d09efd8b", "order.id": "b7ea21b7aef3", "payment.status": "approved"}
-```
-
-**Metrics in the Collector output** (stable semconv, plus business metrics with exemplars that link to the trace):
-
-```text
--> Name: http.server.request.duration   -> Unit: s   -> DataType: Histogram
-   http.request.method=GET http.route=/users/{user_id} http.response.status_code=200  Count: 2 Sum: 0.002933
-   ExplicitBounds: 0.005 0.01 0.025 0.05 0.075 0.1 0.25 0.5 0.75 1 2.5 5 7.5 10
--> Name: orders.created        -> Unit: {order}         -> DataType: Sum        Value: 1  Exemplar Trace ID: 4f7c1579645c3278aea46100839dc37b
--> Name: payments.processed    -> Unit: {payment}       -> DataType: Sum        result=approved  Value: 1  Exemplar Trace ID: 4f7c1579645c3278aea46100839dc37b
--> Name: payment.amount        -> Unit: {currency_unit} -> DataType: Histogram  currency=EUR result=approved  Count: 1 Sum: 25.0
-(also http.client.request.duration, http.server.active_requests, http.server.request/response.body.size; no http.server.duration)
-```
-
-**Fault injection** (`PUT payment /admin/faults {"error_rate":1.0}`, then `POST /orders` returns
-`502 {"detail":"payment service returned HTTP 500","upstream":"payment","order_id":"aecbdc446bbb"}`):
-
-```text
-service  kind    name                  status  http  notes
-order    Server  POST /orders          Error   502   error.type=502
-order    Client  GET                   Unset   200
-user     Server  GET /users/{user_id}  Unset   200
-order    Client  POST                  Error   500   error.type=500
-payment  Server  POST /payments        Error   500   event=fault.injected
-all spans: Trace ID 2c210d680d87b4ec128decebb0c7dd55
-```
-
-**Downstream outage:** with Payment stopped, `POST /orders` returns `503 {"detail":"payment service unavailable"}`, while
-Order's `/readyz` stays `200`.
-
-**Graceful shutdown:** `compose stop user-service` while polling every 0.3 s (`SHUTDOWN_DRAIN_SECONDS=2`):
-
-```text
-20:30:08.035 readyz=200 livez=200
-20:30:08.356 readyz=503 livez=200   <- SIGTERM: readiness fails, traffic still served
-...
-20:30:09.978 readyz=503 livez=200
-20:30:10.309 readyz=000 livez=000   <- drain over: listener closed, telemetry flushed, process exits
-```

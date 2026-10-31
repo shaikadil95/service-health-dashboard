@@ -267,7 +267,7 @@ hostPath volumes, node-exporter uses the host network and PID namespaces. All ot
 security contexts (non-root, no privilege escalation, dropped capabilities, read-only root filesystem where the image
 allows it). The Collector runs as root without capabilities, because the pod log files are root-owned with mode 0640.
 `loadgen` enforces `restricted`. `observability` has no default-deny NetworkPolicy yet: its components talk to the API
-server and the node (kubelet, node-exporter) on host IPs, which kindnet only matches with `ipBlock`s; see Deviations.
+server and the node (kubelet, node-exporter) on host IPs, which kindnet only matches with `ipBlock`s.
 
 ### Storage
 
@@ -301,20 +301,6 @@ Every container has requests and limits (the columns show the configured values)
 Largest consumers in `observability`: Grafana 440 MiB (incl. two sidecars), Prometheus 291 MiB (58k head series),
 Collector 70–220 MiB, Tempo 154 MiB, Loki 91 MiB. The node reported 3.3 GiB of 9.7 GiB in use; CPU stayed below
 0.25 cores in total. `metrics-server` is not installed, so `kubectl top` is not available; Prometheus covers it.
-
-### Deviations from the plan
-
-- **Charts.** Loki and Tempo come from `grafana-community` (where Grafana's documentation now points), not from
-  `grafana/helm-charts`. Tempo is 3.x: the compactor is replaced by the backend scheduler/worker, retention is set there.
-- **Tempo's Jaeger receivers** stay at the chart defaults: the chart's Service templates require them (`receivers.jaeger:
-  null` fails to render). Nothing sends Jaeger and the Service is internal.
-- **Prometheus Operator CRDs** come from the `prometheus-operator-crds` chart (server-side apply, upgraded with the chart)
-  instead of kube-prometheus-stack's `crds/` directory.
-- **No default-deny in `observability`** yet (see Pod Security above); the apps keep theirs. To be revisited with Phase 6.
-- **Collector component names** follow the Collector's renames (`file_log`, `k8s_attributes`, `otlp_grpc`, `otlp_http`);
-  the `debug` exporter is not in any pipeline.
-- **Image preload** (`make platform-images`): not in the plan; added because kubelet pulls of ~15 images one by one
-  through the Podman DNS took longer than Helm's timeout.
 
 ## Visualization and status page (Phase 4)
 
@@ -369,84 +355,16 @@ No Telemetry Pipeline dashboard: its health is covered by alerts in Phase 5; ad-
 
 ## Verification
 
-`make verify` runs [`scripts/verify.sh`](scripts/verify.sh) (Phase 2), [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh)
-([Phase 3](#phase-3-evidence)) and [`scripts/verify-status.sh`](scripts/verify-status.sh) ([Phase 4](#phase-4-evidence)) against the running cluster. `verify.sh` checks the Phase 2 exit criteria. It uses
-`curl --resolve api.localtest.me:80:127.0.0.1` on the host so it does not depend on the host resolver, and a throwaway
-`curl` pod in a `netcheck` namespace (outside `apps`) for the in-cluster checks.
+`make verify` runs the automated checks against the running cluster, one script per phase:
 
-Evidence from `make down && make up && make verify` (Podman 6.1.4 rootful machine, macOS arm64), trimmed:
+| Script | Checks |
+|---|---|
+| [`scripts/verify.sh`](scripts/verify.sh) | Phase 2: gateway and routes from the host (`curl --resolve`, so the host resolver does not matter) and from a throwaway pod in a `netcheck` namespace (CoreDNS rewrite), what is *not* exposed at the edge, the `apps` NetworkPolicies, and readiness (a not-ready pod leaves the endpoints and is not restarted) |
+| [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh) | Phase 3: observability pods and PVCs, metrics/logs/traces of all three services in Prometheus, Loki and Tempo, the service graph, exemplars, blocked write endpoints at the edge, Grafana login and datasources |
+| [`scripts/verify-status.sh`](scripts/verify-status.sh) | Phase 4: status page and Status API contract, NetworkPolicies of the status workloads, both dashboards have data for every service, and the signal correlations followed end to end |
 
-```text
-$ make down && make up        # from scratch: 376 s (two runs: 376 s and 468 s; mostly Envoy Gateway image pulls)
-Container engine: podman
-  ok    podman 6.1.4, rootful, running
-  ok    engine resources: 4 CPUs / 9 GiB
-  ok    kind v0.33.0
-  ok    kubectl v1.37.2 (node image v1.36)
-  ok    helm v4.3.1
-  ok    helm-diff plugin
-  ok    helmfile version v1.8.2
-WARNING: gateway ports 80/443 bind to 0.0.0.0 (reachable from the network); see deploy/README.md
-...
-NAME            NAMESPACE              CHART                                     VERSION   DURATION
-apps-baseline   apps                   ./charts/namespace-baseline               0.1.0           0s
-envoy-gateway   envoy-gateway-system   oci://docker.io/envoyproxy/gateway-helm   v1.9.3       1m48s
-edge            envoy-gateway-system   ./charts/edge                             0.1.0           0s
-payment         apps                   ./charts/microservice                     0.1.0           3s
-user            apps                   ./charts/microservice                     0.1.0           3s
-order           apps                   ./charts/microservice                     0.1.0           3s
-coredns: *.localtest.me -> envoy-edge.envoy-gateway-system.svc.cluster.local (configured, CoreDNS restarted)
-
-$ make verify
-== 1. Readiness of the platform
-  PASS  Gateway envoy-gateway-system/edge Programmed=True
-  PASS  deployment apps/user available
-  PASS  deployment apps/order available
-  PASS  deployment apps/payment available
-== 2. Host -> gateway (http://api.localtest.me:80)
-  WARN  host DNS does not resolve api.localtest.me; add it to /etc/hosts (see deploy/README.md)
-  PASS  POST /orders -> 201
-  PASS  GET /orders/32c2dacf27d2 -> 200
-  PASS  GET /users/u-1001 -> 200
-  PASS  GET /payments (not exposed) -> 404
-  PASS  GET /admin/faults (not exposed) -> 404
-  PASS  GET /livez (not exposed) -> 404
-  PASS  GET /readyz (not exposed) -> 404
-  PASS  GET /docs (not exposed) -> 404
-  PASS  GET /orders/../admin/faults (not exposed) -> 404
-  PASS  GET /orders/%2e%2e/admin/faults (not exposed) -> 404
-  PASS  GET /users/..%2fadmin/faults (not exposed) -> 404
-  PASS  POST /payments (not exposed) -> 404
-  PASS  PUT /admin/faults (not exposed) -> 404
-== 3. Pod -> gateway via CoreDNS rewrite (namespace netcheck, outside apps)
-  PASS  api.localtest.me resolves in-cluster to the envoy-edge Service -> 10.96.232.202
-  PASS  pod: POST http://api.localtest.me/orders -> 201
-  PASS  pod: GET http://api.localtest.me/users/u-1001 -> 200
-== 4. NetworkPolicy (default deny in apps)
-  PASS  pod outside apps -> payment.apps directly (blocked) -> 000
-  PASS  pod outside apps -> user.apps directly (blocked) -> 000
-  PASS  pod outside apps -> order.apps directly (blocked) -> 000
-  PASS  order -> user and order -> payment allowed (POST /orders returned 201 above)
-== 5. Readiness probe: not ready => out of endpoints, not restarted
-  PASS  EndpointSlice user: endpoint ready (after 8 s) -> false
-  PASS  gateway GET /users/u-1001 while not ready -> 503
-  PASS  /livez still healthy -> 200
-  PASS  restartCount unchanged after 35 s -> 0
-  PASS  EndpointSlice user: endpoint ready after restore -> true
-  PASS  gateway GET /users/u-1001 after restore -> 200
-
-verify: 30 passed, 0 failed
-
-$ make cluster-up deploy      # second run: idempotent, 5 s
-kind cluster 'shd' already exists
-coredns: *.localtest.me rewrite already present (unchanged)
-
-# Graceful shutdown: 150 requests (every 0.2 s) through the gateway during `kubectl rollout restart deploy/user`
-    150 200
-```
-
-Before the `BackendTrafficPolicy` was added, check 5 returned **200** instead of 503 through the gateway (Envoy panic
-mode, see [Edge and routing](#edge-and-routing)), although the EndpointSlice already showed `ready=false`.
+Each check prints `PASS`/`FAIL` and the script exits non-zero on any failure. The checks retry while the first export and
+scrape cycles complete, so they can run right after `make up`.
 
 Readiness by hand:
 
@@ -457,169 +375,6 @@ kubectl -n apps get endpointslice -l kubernetes.io/service-name=user \
   -o jsonpath='{.items[*].endpoints[*].conditions}'   # ready=false, pod not restarted
 curl -X DELETE localhost:18081/admin/faults
 ```
-
-### Phase 3 evidence
-
-[`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh) runs after `verify.sh`. It queries through the gateway
-(`--resolve <ui>.localtest.me:80:127.0.0.1`), Grafana's datasource proxy for Loki and Tempo, and retries each check for up
-to 4 minutes while the first export and scrape cycles complete. Final run from scratch (Podman 6.1.4, macOS arm64), trimmed:
-
-```text
-$ make down && make up        # 352 s (images cached by the engine; first ever run ~15 min of pulls)
-platform images: 15 referenced, 15 not on the node yet
-platform images: loaded 15 into shd-control-plane
-NAME                       NAMESPACE              CHART                                               VERSION   DURATION
-prometheus-operator-crds   observability          prometheus-community/prometheus-operator-crds       32.0.2          4s
-blackbox-exporter          observability          prometheus-community/prometheus-blackbox-exporter   11.20.2         3s
-otel-collector             observability          open-telemetry/opentelemetry-collector              0.178.1        12s
-kube-prometheus-stack      observability          prometheus-community/kube-prometheus-stack          92.17.0        25s
-tempo                      observability          grafana-community/tempo                             3.2.1          26s
-loki                       observability          grafana-community/loki                              20.2.1         47s
-observability-config       observability          ./charts/observability-config                       0.1.0           0s
-loadgen                    loadgen                ../loadgen                                          0.1.0           1s
-
-$ make verify                 # 86 s; Phase 2 part: 30 passed, 0 failed (as above)
-== 1. Observability workloads and storage
-  PASS  all pods Ready in observability (10)
-  PASS  all pods Ready in loadgen (1)
-  PASS  OTel Collector DaemonSet: one agent per node
-  PASS  PVC prometheus-kps-prometheus-db-prometheus-kps-prometheus-0 -> Bound 2Gi
-  PASS  PVC alertmanager-kps-alertmanager-db-alertmanager-kps-alertmanager-0 -> Bound 1Gi
-  PASS  PVC storage-loki-0 -> Bound 2Gi
-  PASS  PVC storage-tempo-0 -> Bound 2Gi
-== 2. Prometheus (via http://prometheus.localtest.me)
-  PASS  no scrape target down -> 22 targets, down: 0
-  PASS  OTLP http_server_request_duration_seconds for user/order/payment -> order payment user
-  PASS  business metric orders_created_total -> 178
-  PASS  business metric payments_processed_total -> 201
-  PASS  Tempo service graph edges (traces_service_graph_request_total) -> gateway->order gateway->user order->payment order->user user->gateway user->user
-  PASS  Tempo span metrics (traces_spanmetrics_calls_total) -> 1953
-  PASS  blackbox probe_success for user/order/payment -> order=1 payment=1 user=1
-  PASS  Envoy gateway metrics (envoy_cluster_upstream_rq_total) -> 764
-  PASS  Collector metrics: spans accepted -> 1963
-  PASS  Collector metrics: log records accepted -> 1403
-  PASS  Collector metrics: metric points accepted -> 126
-  INFO  Collector export failures since start -> 0
-  PASS  exemplars on http_server_request_duration_seconds -> 31 exemplars with trace_id
-== 3. Edge routes for the UIs
-  PASS  GET http://grafana.localtest.me/api/health -> 200
-  PASS  GET http://prometheus.localtest.me/-/ready -> 200
-  PASS  GET http://alertmanager.localtest.me/-/ready -> 200
-  PASS  POST prometheus.localtest.me/api/v1/write (blocked at the edge) -> 403
-  PASS  POST prometheus.localtest.me/api/v1/otlp/v1/metrics (blocked at the edge) -> 403
-  PASS  POST prometheus.localtest.me/-/reload (blocked at the edge) -> 403
-  PASS  POST prometheus.localtest.me/-/quit (blocked at the edge) -> 403
-== 4. Grafana (via http://grafana.localtest.me)
-  PASS  anonymous API access refused -> 401
-  PASS  chart default password rejected -> 401
-  PASS  login with the generated admin password -> 200
-  PASS  datasource prometheus health -> OK
-  PASS  datasource loki health -> OK
-  PASS  datasource tempo health -> OK
-== 5. Loki logs and Tempo traces (through Grafana's datasource proxy)
-  PASS  Loki: user JSON log line with trace_id, severity, message -> 6ef055ae6abf8d88e619c39b49414abf INFO 'request completed'
-  PASS  Loki: order JSON log line with trace_id, severity, message -> 85c961c87ac24de7119f4bbb981c16ce INFO 'request completed'
-  PASS  Loki: payment JSON log line with trace_id, severity, message -> 6ef055ae6abf8d88e619c39b49414abf INFO 'request completed'
-  PASS  Tempo: POST /orders trace (trace_id from a Loki line) spans gateway -> order -> user/payment -> trace_id 4792ae6fe56a5c72a9f9cbc2e9e7e2c0 from Loki: 7 spans, edges: gateway->order order->payment order->user
-
-verify-telemetry: 36 passed, 0 failed
-```
-
-One `POST /orders` trace as Tempo returns it (service, kind, span name; indentation = parent):
-
-```text
-gateway  SERVER  ingress                                      http.url=http://api.localtest.me/orders
-gateway  CLIENT    router httproute/apps/order/rule/0 egress
-order    SERVER      POST /orders                               201
-order    CLIENT        GET  -> user    SERVER  GET /users/{user_id}   200
-order    CLIENT        POST -> payment SERVER  POST /payments         201
-```
-
-A Loki line of the same request (structured metadata trimmed): `{service_name="order", k8s_namespace_name="apps",
-k8s_container_name="order", deployment_environment_name="kind"}` `request completed` with `severity_text=INFO`,
-`trace_id`, `span_id`, `http_route=/orders`, `http_response_status_code=201`, `k8s_pod_name`, `logger=shd.runtime`.
-
-In the service graph, `user->gateway` and `user->user` are Tempo's **virtual client node**, which Tempo always calls
-`user`: requests whose caller sends no spans (k6 and curl at the edge, `kubectl port-forward` calls to `/admin/faults`
-in `verify.sh`). They are not the User service.
-
-### Phase 4 evidence
-
-[`scripts/verify-status.sh`](scripts/verify-status.sh) runs last in `make verify`. It checks the status page and the documented JSON
-through the gateway, the NetworkPolicies from a pod outside `apps`, both dashboards through Grafana's API (every Prometheus query of
-the Overview has data for all three services, every panel of Service Detail including the logs panel has data for each service),
-and the correlations by following them: an exemplar of the p95 panel to its trace in Tempo, a Loki line's `trace_id` to its trace,
-the trace-to-logs query back to Loki, and the service-graph metrics behind the service map. Final run from scratch
-(`make down && make up && make verify`, Podman 6.1.4, macOS arm64): `make up` 429 s, `make verify` 290 s,
-**Phase 2: 30 passed, Phase 3: 36 passed, Phase 4: 27 passed, 0 failed**. The Phase 4 part:
-
-```text
-== 1. Status workloads
-  PASS  deployment apps/status-api available
-  PASS  deployment apps/status-web available
-== 2. Status page and Status API (http://status.localtest.me)
-  PASS  GET / (status page) -> 200 text/html
-  PASS  index.html is the status page
-  PASS  GET /services/payment (SPA fallback) -> 200 text/html
-  PASS  GET /assets/index-Dq5nv3id.js (hashed asset, long-lived cache) -> public, max-age=31536000, immutable
-  PASS  GET /api/v1/services matches the contract -> keys, sources ok, metrics and series for user/order/payment
-  PASS  all three services UP -> overall=UP user=UP order=UP payment=UP
-  PASS  GET /api/v1/services/payment -> 200 payment
-  PASS  GET /api/v1/services/unknown -> 404
-  PASS  GET /api/v1/alerts -> 200 ok
-  PASS  GET /admin/faults is not the Status API (served by the page) -> text/html
-  PASS  GET /docs is not the Status API (served by the page) -> text/html
-  PASS  GET /openapi.json is not the Status API (served by the page) -> text/html
-  PASS  GET /api/../admin/faults is not the Status API (served by the page) -> text/html
-  PASS  PUT /admin/faults (not routed to the API) -> 405
-== 3. NetworkPolicy (namespace netcheck-status, outside apps)
-  PASS  pod outside apps -> status-api.apps directly (blocked) -> 000
-  PASS  pod outside apps -> status-web.apps directly (blocked) -> 000
-  PASS  pod: GET http://status.localtest.me/api/v1/services via the gateway -> 200
-  PASS  status-api -> Prometheus 9090 and Alertmanager 9093 allowed (both sources ok above)
-== 4. Grafana dashboards (via http://grafana.localtest.me)
-  PASS  dashboards provisioned (sidecar): Service Health Overview, Service Detail -> Service Detail (7 panels); Service Health Overview (5 panels)
-  PASS  Overview: every panel has data for all three services -> data for user/order/payment in: Status, Request rate, Error % (5xx), p95 latency
-  PASS  Service Detail: every panel has data for each service -> all panels (incl. logs) have data for user/order/payment
-== 5. Correlations
-  PASS  datasource correlation settings (provisioned, macros not expanded) -> exemplars->tempo, loki trace_id->tempo, tempo->loki/prometheus, service map, node graph
-  PASS  exemplar on the p95 panel -> trace in Tempo -> trace_id b8786953191dee761f858d42275fdf57: 7 spans in Tempo
-  PASS  log line -> trace (derived field) -> logs of another service (traces to logs) -> trace_id b4208fa803efbe466ac22a74f65bddc2 (payment log line) -> Tempo services ['gateway', 'order', 'payment', 'user'] -> 2 order log lines
-  PASS  service map metrics (Tempo service graph) for the Tempo datasource -> gateway->order order->payment order->user
-
-verify-status: 27 passed, 0 failed
-```
-
-**Fault test** (k6 running, faults set with `kubectl port-forward` + `PUT /admin/faults`, Status API and the Overview's status query
-polled every 5 s; both always agreed):
-
-| Fault | Status API and Overview | After reset |
-|---|---|---|
-| Payment `error_rate=0.5` | payment `DEGRADED` after **41 s** (5xx 5.6%), order `DEGRADED` after **62 s** (its `POST /orders` return 502); peak 5xx ratio ≈ 50% payment / 35% order on the Error % panel | order `UP` after 242 s, payment after 263 s |
-| User `latency_ms=800` | user `DEGRADED` after **31 s** (p95 872 ms); order follows (it waits for user: p95 940 ms) | order `UP` after 269 s, user after 290 s |
-
-Detection within about one minute is the exit criterion. Recovery takes about five minutes on purpose: the status uses the
-5-minute windows of the alert rules, so the page and the on-call email (Phase 5) never disagree, and a short dip does not flap.
-The sparklines use 1-minute windows and show the recovery first. The Overview screenshot in
-[Visualization and status page](#visualization-and-status-page-phase-4) was taken during the User fault, with the earlier Payment
-error spike still in the 30-minute window; the status page screenshot is in [`../web/README.md`](../web/README.md).
-
-**Resources:** status-api 50 MiB, status-web (nginx) 5 MiB working set; images 200 MB (Python) and 63 MB (nginx).
-
-**Phase 4 deviations from the plan**
-
-- **Dashboards in `charts/observability-config/dashboards/`**, not `deploy/dashboards/`: Helm only reads files inside a chart
-  (`.Files.Glob`), and that chart already owns the other observability resources.
-- **Status rule thresholds**: 5xx > 5% (the `HighErrorRate` threshold); the architecture document said 1%, which would have
-  contradicted the alert. A fourth status `UNKNOWN` covers a missing data source. Both are noted in ADR 0006.
-- **Overview "firing alerts" is a Prometheus `ALERTS` table**, not Grafana's alert list panel, which lists Grafana-managed rules;
-  the project's rules are Prometheus rules (Phase 5). The Status API reads Alertmanager instead (silences and inhibition applied).
-- **Status API uses `/api/v1/query_range` too**, for the sparkline series, besides `/api/v1/query`.
-- **`microservice` chart**: `shdRuntime` and `tmpVolume` values so that the nginx image reuses the chart; the three services render
-  unchanged.
-- **shadcn CLI and TLS**: the CLI's HTTP client rejected `ui.shadcn.com`'s certificate chain with Node's bundled CA store; it ran with
-  `NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem` (macOS system CAs). The `--monorepo` scaffold uses turbo; the app was renamed from
-  `apps/web` to `apps/status`.
 
 ## Troubleshooting
 

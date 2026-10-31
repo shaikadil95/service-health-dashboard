@@ -12,7 +12,6 @@ It is an architecture exercise that focuses on **design decisions and trade-offs
 
 > **Status: Phase 4 (visualization and Status API).** The design, the three instrumented services, the kind platform, the telemetry pipeline,
 > Grafana with linked signals and two dashboards, the Status API and the status page are in place. Alert rules and email arrive in Phase 5.
-> See the [roadmap](docs/roadmap.md).
 
 ![Status page during an injected latency fault](docs/screenshots/status-page.png)
 
@@ -21,13 +20,10 @@ It is an architecture exercise that focuses on **design decisions and trade-offs
 | Document | What it covers |
 |---|---|
 | [Architecture](docs/architecture.md) | **The main deliverable.** Goals, the architecture, the five main data flows, trade-offs, probe design, alerting, the Status API contract, networking, security, and how the design evolves for production |
-| [Architecture Decision Records](docs/adr/README.md) | One MADR document for each key decision (ADRs 0001–0010) |
 | [Diagrams](docs/diagrams/) | Mermaid sources (`.mmd`) and rendered SVG files |
-| [Roadmap](docs/roadmap.md) | Phases 0–7 with scope and exit criteria |
 | [Services](services/README.md) | Phase 1: endpoints, probes, fault injection, telemetry. Phase 4: the [Status API contract](services/README.md#status-api) |
 | [Web](web/README.md) | Phase 4: pnpm monorepo with the shadcn/ui status page |
-| [Local platform](deploy/README.md) | Phase 2: kind, Envoy Gateway, Helm chart, NetworkPolicies, CoreDNS, troubleshooting. Phase 3: telemetry pipeline and storage (Collector, Prometheus, Loki, Tempo, Grafana, blackbox, k6). Phase 4: Grafana correlations and dashboards, status page routing, evidence |
-| [CI/CD placeholder](.github/workflows/README.md) | Planned CI and GitOps CD |
+| [Local platform](deploy/README.md) | Phase 2: kind, Envoy Gateway, Helm chart, NetworkPolicies, CoreDNS, troubleshooting. Phase 3: telemetry pipeline and storage (Collector, Prometheus, Loki, Tempo, Grafana, blackbox, k6). Phase 4: Grafana correlations and dashboards, status page routing, `make verify` |
 
 ## Architecture overview
 
@@ -80,21 +76,21 @@ The [architecture document](docs/architecture.md) explains each flow.
 
 ## Tech stack
 
-| Concern | Choice | ADR |
+| Concern | Choice | Why |
 |---|---|---|
-| Services | Python 3.12, FastAPI | — |
-| Instrumentation | OpenTelemetry SDK (OTLP) | [0001](docs/adr/0001-opentelemetry-for-instrumentation.md) |
-| Collection | OpenTelemetry Collector (contrib) as a DaemonSet | [0002](docs/adr/0002-collector-topology.md) |
-| Traces | Grafana Tempo with the metrics-generator | [0003](docs/adr/0003-tempo-vs-jaeger.md) |
-| Metrics | Prometheus (kube-prometheus-stack): OTLP push and scrape, kube-state-metrics, blackbox exporter | [0004](docs/adr/0004-prometheus-otlp-push-and-scrape.md) |
-| Logs | Grafana Loki | [0005](docs/adr/0005-loki-for-logs.md) |
-| Dashboards | Grafana (dashboards as code) | [0004](docs/adr/0004-prometheus-otlp-push-and-scrape.md) |
-| Status view | Status API (FastAPI backend for frontend) and a status page in React, TypeScript, Vite, Tailwind and shadcn/ui | [0006](docs/adr/0006-status-api-bff-and-status-page.md) |
-| Alerting | Prometheus rules → Alertmanager → email (Mailpit) | [0007](docs/adr/0007-alertmanager-routing-and-mailpit.md) |
-| Edge | Envoy Gateway (Kubernetes Gateway API) on `*.localtest.me` | [0008](docs/adr/0008-envoy-gateway-as-edge.md) |
-| Identity (Phase 6) | Keycloak through the Keycloak Operator (`customers` and `ops` realms), Envoy Gateway OIDC and JWT | [0009](docs/adr/0009-keycloak-and-sso.md) |
-| Runtime and deployment | kind on Docker or Podman, Helm 4, helmfile, Makefile | [0010](docs/adr/0010-local-runtime-kind.md) |
-| Load | k6 | — |
+| Services | Python 3.12, FastAPI | Small, readable services with first-class OpenTelemetry auto-instrumentation |
+| Instrumentation | OpenTelemetry SDK (OTLP) | One vendor-neutral API for traces, metrics and logs |
+| Collection | OpenTelemetry Collector (contrib) as a DaemonSet | Node-local agent that adds Kubernetes metadata and tails pod logs |
+| Traces | Grafana Tempo with the metrics-generator | Cheap object-storage design, TraceQL, span metrics and the service graph |
+| Metrics | Prometheus (kube-prometheus-stack): OTLP push and scrape, kube-state-metrics, blackbox exporter | The Kubernetes standard; native OTLP receiver plus target health and synthetic checks |
+| Logs | Grafana Loki | Indexes labels only, so it stays light; same label model as Prometheus |
+| Dashboards | Grafana (dashboards as code) | Linked signals: metric → exemplar trace → logs |
+| Status view | Status API (FastAPI backend for frontend) and a status page in React, TypeScript, Vite, Tailwind and shadcn/ui | A small, stable UP / DEGRADED / DOWN contract for people who do not read PromQL |
+| Alerting | Prometheus rules → Alertmanager → email (Mailpit) | Grouping, inhibition, silences and severity routing; the receiver is swappable |
+| Edge | Envoy Gateway (Kubernetes Gateway API) on `*.localtest.me` | Gateway API standard with built-in OIDC and JWT policies |
+| Identity (Phase 6) | Keycloak through the Keycloak Operator (`customers` and `ops` realms), Envoy Gateway OIDC and JWT | Open-source OIDC provider; realms keep customer and staff identities apart |
+| Runtime and deployment | kind on Docker or Podman, Helm 4, helmfile, Makefile | Conformant Kubernetes on a laptop, one command to reproduce |
+| Load | k6 | Steady, scriptable background traffic |
 
 ## Roadmap
 
@@ -109,7 +105,6 @@ The [architecture document](docs/architecture.md) explains each flow.
 | **6** Identity | Keycloak, HTTPS, OIDC and JWT, customer shop page | Customer login and order. SSO for engineers. `401` without a token. |
 | **7** CI/CD | Placeholder: GitHub Actions CI and Argo CD | — |
 
-Full details are in [docs/roadmap.md](docs/roadmap.md).
 
 ## Local URLs
 
@@ -177,7 +172,7 @@ See [services/README.md](services/README.md) for endpoints, probes, fault inject
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The project uses Conventional Commits and one pull request per phase.
+The project uses [Conventional Commits](https://www.conventionalcommits.org/) and one branch per phase. Run `make lint test` (and `make web-check`, `make lint-charts`) before you commit.
 
 ## License
 

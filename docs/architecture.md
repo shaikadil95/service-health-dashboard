@@ -1,8 +1,8 @@
 # Architecture: Service Health Dashboard
 
 > A lightweight observability solution for three backend services (User, Order, Payment).
-> This document is the design deliverable. Each decision has an ADR in [`adr/`](adr/README.md).
-> The phased delivery plan is in [`roadmap.md`](roadmap.md).
+> This document is the design deliverable: the architecture, the main data flows and the reasoning behind each
+> decision, with the alternatives that were considered and the trade-offs that were accepted (see [§5](#5-key-decisions-and-trade-offs)).
 
 ## Contents
 
@@ -47,7 +47,7 @@ Payment) that helps R&D teams to:
 - High availability, multi-cluster deployment and long-term retention. These are covered on paper in §11 but not built.
 - Real paging integrations such as PagerDuty or Opsgenie. Mailpit stands in for them, and the receiver can be swapped by changing configuration.
 - Real business logic, persistence or payment processing. The services are small FastAPI apps with in-memory stores and a fault-injection endpoint (`/admin/faults`: error rate, added latency, not-ready), so that failures can be demonstrated. Because there is no database, traces contain no DB spans.
-- A working CI/CD pipeline. Only a placeholder exists (see [`.github/workflows/README.md`](../.github/workflows/README.md)).
+- A working CI/CD pipeline. It is planned as GitHub Actions CI and Argo CD GitOps (see [§11](#11-evolving-to-production)).
 
 ## 2. Architecture overview
 
@@ -113,25 +113,25 @@ A k6 load generator sends steady traffic so that there is always something to ob
 
 ## 3. Component responsibilities
 
-| Component | Responsibility | Deployed as (local) | ADR |
-|---|---|---|---|
-| User / Order / Payment services | Business APIs in Python 3.12 and FastAPI: User `GET /users/{id}`, Order `POST /orders` and `GET /orders/{id}`, Payment `POST /payments`. Order calls User and Payment. They expose `/livez`, `/readyz` and `/admin/faults`, send OTLP telemetry including business metrics (`orders_created_total`, `payments_processed_total{result}`), and write JSON logs to stdout. | Deployment per service | [0001](adr/0001-opentelemetry-for-instrumentation.md) |
-| OpenTelemetry SDK | Auto- and manual instrumentation. Propagates W3C Trace Context and uses the HTTP semantic conventions. | Library in each service | [0001](adr/0001-opentelemetry-for-instrumentation.md) |
-| OpenTelemetry Collector | Receives OTLP data and tails pod logs (`filelog`). Applies `memory_limiter`, `k8sattributes` and `batch`, then exports to the backends. | DaemonSet (agent) | [0002](adr/0002-collector-topology.md) |
-| Prometheus (kube-prometheus-stack) | Metrics storage. Native OTLP receiver and remote-write receiver. Scrapes cluster targets and evaluates recording and alerting rules. | StatefulSet (Prometheus Operator) | [0004](adr/0004-prometheus-otlp-push-and-scrape.md) |
-| kube-state-metrics, node-exporter | Kubernetes object state (replicas, readiness, restarts) and node resources | Part of kube-prometheus-stack | [0004](adr/0004-prometheus-otlp-push-and-scrape.md) |
-| Blackbox exporter | Synthetic HTTP checks of each service's `/readyz`. `probe_success` is the basis of `ServiceDown`. | Deployment | [0004](adr/0004-prometheus-otlp-push-and-scrape.md) |
-| Loki | Log storage. Indexes labels only and accepts OTLP log ingestion. | Single-binary mode | [0005](adr/0005-loki-for-logs.md) |
-| Tempo | Trace storage, TraceQL queries, and a metrics-generator for span metrics and the service graph | Single-binary mode | [0003](adr/0003-tempo-vs-jaeger.md) |
-| Alertmanager | Grouping, deduplication, inhibition, silences and severity-based routing | Part of kube-prometheus-stack | [0007](adr/0007-alertmanager-routing-and-mailpit.md) |
-| Mailpit | Local SMTP sink with a web UI. Stands in for the on-call notification channel. | Deployment | [0007](adr/0007-alertmanager-routing-and-mailpit.md) |
-| Grafana | Dashboards as code (Service Health Overview, Service Detail, Telemetry Pipeline), Explore, Traces Drilldown, and links between signals (exemplars to traces to logs) | Part of kube-prometheus-stack | [0004](adr/0004-prometheus-otlp-push-and-scrape.md) |
-| Status API | FastAPI backend for frontend, itself instrumented with OTel. Queries Prometheus and Alertmanager and computes each service's status. | Deployment | [0006](adr/0006-status-api-bff-and-status-page.md) |
-| Web frontends | React, TypeScript, Vite, Tailwind and shadcn/ui in a pnpm monorepo under `web/`: `apps/status` (status page, Phase 4), `apps/shop` (customer page, Phase 6) and the shared `packages/ui` (`@workspace/ui`). Built as static assets. | `nginx-unprivileged` Deployment per app | [0006](adr/0006-status-api-bff-and-status-page.md) |
-| k6 | Steady, low background traffic for the demo | Deployment ([`loadgen/`](../loadgen)) | — |
-| Envoy Gateway | Gateway API implementation. Host-based routing on `*.localtest.me`, TLS, and OIDC and JWT authentication from Phase 6. | Deployment and managed Envoy proxy | [0008](adr/0008-envoy-gateway-as-edge.md) |
-| Keycloak (Phase 6) | Identity provider at `sso.localtest.me`. A `customers` realm for the shop and API, and an `ops` realm for operations UIs. | Official **Keycloak Operator** (`Keycloak` and `KeycloakRealmImport` CRs) with a plain PostgreSQL StatefulSet (official image, PVC) | [0009](adr/0009-keycloak-and-sso.md) |
-| kind on Podman or Docker | Local Kubernetes runtime | Containers on the host | [0010](adr/0010-local-runtime-kind.md) |
+| Component | Responsibility | Deployed as (local) |
+|---|---|---|
+| User / Order / Payment services | Business APIs in Python 3.12 and FastAPI: User `GET /users/{id}`, Order `POST /orders` and `GET /orders/{id}`, Payment `POST /payments`. Order calls User and Payment. They expose `/livez`, `/readyz` and `/admin/faults`, send OTLP telemetry including business metrics (`orders_created_total`, `payments_processed_total{result}`), and write JSON logs to stdout. | Deployment per service |
+| OpenTelemetry SDK | Auto- and manual instrumentation. Propagates W3C Trace Context and uses the HTTP semantic conventions. | Library in each service |
+| OpenTelemetry Collector | Receives OTLP data and tails pod logs (`filelog`). Applies `memory_limiter`, `k8sattributes` and `batch`, then exports to the backends. | DaemonSet (agent) |
+| Prometheus (kube-prometheus-stack) | Metrics storage. Native OTLP receiver and remote-write receiver. Scrapes cluster targets and evaluates recording and alerting rules. | StatefulSet (Prometheus Operator) |
+| kube-state-metrics, node-exporter | Kubernetes object state (replicas, readiness, restarts) and node resources | Part of kube-prometheus-stack |
+| Blackbox exporter | Synthetic HTTP checks of each service's `/readyz`. `probe_success` is the basis of `ServiceDown`. | Deployment |
+| Loki | Log storage. Indexes labels only and accepts OTLP log ingestion. | Single-binary mode |
+| Tempo | Trace storage, TraceQL queries, and a metrics-generator for span metrics and the service graph | Single-binary mode |
+| Alertmanager | Grouping, deduplication, inhibition, silences and severity-based routing | Part of kube-prometheus-stack |
+| Mailpit | Local SMTP sink with a web UI. Stands in for the on-call notification channel. | Deployment |
+| Grafana | Dashboards as code (Service Health Overview, Service Detail, Telemetry Pipeline), Explore, Traces Drilldown, and links between signals (exemplars to traces to logs) | Part of kube-prometheus-stack |
+| Status API | FastAPI backend for frontend, itself instrumented with OTel. Queries Prometheus and Alertmanager and computes each service's status. | Deployment |
+| Web frontends | React, TypeScript, Vite, Tailwind and shadcn/ui in a pnpm monorepo under `web/`: `apps/status` (status page, Phase 4), `apps/shop` (customer page, Phase 6) and the shared `packages/ui` (`@workspace/ui`). Built as static assets. | `nginx-unprivileged` Deployment per app |
+| k6 | Steady, low background traffic for the demo | Deployment ([`loadgen/`](../loadgen)) |
+| Envoy Gateway | Gateway API implementation. Host-based routing on `*.localtest.me`, TLS, and OIDC and JWT authentication from Phase 6. | Deployment and managed Envoy proxy |
+| Keycloak (Phase 6) | Identity provider at `sso.localtest.me`. A `customers` realm for the shop and API, and an `ops` realm for operations UIs. | Official **Keycloak Operator** (`Keycloak` and `KeycloakRealmImport` CRs) with a plain PostgreSQL StatefulSet (official image, PVC) |
+| kind on Podman or Docker | Local Kubernetes runtime | Containers on the host |
 
 ### Custom resources (CRDs)
 
@@ -301,18 +301,18 @@ only the expected calls: the Gateway to the services, Order to User and Payment,
 
 ## 5. Key decisions and trade-offs
 
-| Decision | Chosen | Main alternative(s) | Why | Accepted trade-off | ADR |
-|---|---|---|---|---|---|
-| Instrumentation | OpenTelemetry SDK + OTLP | Prometheus client libraries, vendor agents | One vendor-neutral API for all three signals and the CNCF standard. Backends can be swapped. | The SDK is more complex than a Prometheus client. The Python logs SDK is not yet stable, so logs go through stdout. | [0001](adr/0001-opentelemetry-for-instrumentation.md) |
-| Collector topology | One-tier **DaemonSet** locally. Agent + gateway in production. | Sidecar per pod, gateway only | Node-local, cheap, and adds Kubernetes metadata and log tailing. Lightest option for one node. | No central tail sampling and no persistent buffering locally | [0002](adr/0002-collector-topology.md) |
-| Tracing backend | **Tempo** | Jaeger v2 | Object-storage-only backend, TraceQL, Traces Drilldown, a metrics-generator for span metrics and the service graph, and native Grafana links | No standalone UI and no index-based search. Governed by Grafana Labs (AGPLv3) rather than CNCF-graduated like Jaeger. | [0003](adr/0003-tempo-vs-jaeger.md) |
-| Metrics | **Prometheus** (OTLP push + scrape) via kube-prometheus-stack | Mimir, VictoriaMetrics, OTel-only | The de facto standard. Native OTLP and remote-write receivers. The Operator and default rules are included. | A single node with local disk. Scaling needs Mimir or Thanos (see §11). | [0004](adr/0004-prometheus-otlp-push-and-scrape.md) |
-| Logs | **Loki** | OpenSearch / Elasticsearch | Indexes labels only, so it is cheap and light, and it uses the same label model as Prometheus | Full-text search scans data. Label cardinality needs discipline. | [0005](adr/0005-loki-for-logs.md) |
-| Status view | Custom **Status API (BFF)** + status page in **React, Vite and shadcn/ui** | Grafana public dashboard, Uptime Kuma, Statuspage | A small, stable contract for non-experts. Hides PromQL and caches results. Accessible, consistent components that the Phase 6 shop page reuses. | An extra service plus a Node and pnpm build toolchain | [0006](adr/0006-status-api-bff-and-status-page.md) |
-| Notification | **Alertmanager** → email (**Mailpit** locally) | Grafana Alerting, direct webhooks | Grouping, inhibition, silences and routing. Mature, and fits the Prometheus rules model. | Email is not real paging. Swap the receiver in production. | [0007](adr/0007-alertmanager-routing-and-mailpit.md) |
-| Edge | **Envoy Gateway** (Gateway API) | Traefik, ingress-nginx (retired) | Gateway API is the successor to Ingress. Built-in OIDC and JWT `SecurityPolicy` for Phase 6, with no oauth2-proxy. | More CRDs to learn. Heavier than Traefik (about 250–350 MB). | [0008](adr/0008-envoy-gateway-as-edge.md) |
-| Identity | **Keycloak**, realms `customers` and `ops` (Phase 6, *Proposed*) | Dex, a hosted identity provider | Open source, full OIDC support, and realms keep customer and staff identities apart | Heavy (JVM plus PostgreSQL, about 1–1.5 GB more RAM). Requires HTTPS. | [0009](adr/0009-keycloak-and-sso.md) |
-| Local runtime | **kind** on Docker (preferred) or Podman | k3d, minikube, Docker Compose | Conformant Kubernetes, also usable in CI, and the Makefile detects either container engine | The Podman provider is experimental and needs a rootful Podman machine | [0010](adr/0010-local-runtime-kind.md) |
+| Decision | Chosen | Main alternative(s) | Why | Accepted trade-off |
+|---|---|---|---|---|
+| Instrumentation | OpenTelemetry SDK + OTLP | Prometheus client libraries, vendor agents | One vendor-neutral API for all three signals and the CNCF standard. Backends can be swapped. | The SDK is more complex than a Prometheus client. The Python logs SDK is not yet stable, so logs go through stdout. |
+| Collector topology | One-tier **DaemonSet** locally. Agent + gateway in production. | Sidecar per pod, gateway only | Node-local, cheap, and adds Kubernetes metadata and log tailing. Lightest option for one node. | No central tail sampling and no persistent buffering locally |
+| Tracing backend | **Tempo** | Jaeger v2 | Object-storage-only backend, TraceQL, Traces Drilldown, a metrics-generator for span metrics and the service graph, and native Grafana links | No standalone UI and no index-based search. Governed by Grafana Labs (AGPLv3) rather than CNCF-graduated like Jaeger. |
+| Metrics | **Prometheus** (OTLP push + scrape) via kube-prometheus-stack | Mimir, VictoriaMetrics, OTel-only | The de facto standard. Native OTLP and remote-write receivers. The Operator and default rules are included. | A single node with local disk. Scaling needs Mimir or Thanos (see §11). |
+| Logs | **Loki** | OpenSearch / Elasticsearch | Indexes labels only, so it is cheap and light, and it uses the same label model as Prometheus | Full-text search scans data. Label cardinality needs discipline. |
+| Status view | Custom **Status API (BFF)** + status page in **React, Vite and shadcn/ui** | Grafana public dashboard, Uptime Kuma, Statuspage | A small, stable contract for non-experts. Hides PromQL and caches results. Accessible, consistent components that the Phase 6 shop page reuses. | An extra service plus a Node and pnpm build toolchain |
+| Notification | **Alertmanager** → email (**Mailpit** locally) | Grafana Alerting, direct webhooks | Grouping, inhibition, silences and routing. Mature, and fits the Prometheus rules model. | Email is not real paging. Swap the receiver in production. |
+| Edge | **Envoy Gateway** (Gateway API) | Traefik, ingress-nginx (retired) | Gateway API is the successor to Ingress. Built-in OIDC and JWT `SecurityPolicy` for Phase 6, with no oauth2-proxy. | More CRDs to learn. Heavier than Traefik (about 250–350 MB). |
+| Identity | **Keycloak**, realms `customers` and `ops` (Phase 6, *Proposed*) | Dex, a hosted identity provider | Open source, full OIDC support, and realms keep customer and staff identities apart | Heavy (JVM plus PostgreSQL, about 1–1.5 GB more RAM). Requires HTTPS. |
+| Local runtime | **kind** on Docker (preferred) or Podman | k3d, minikube, Docker Compose | Conformant Kubernetes, also usable in CI, and the Makefile detects either container engine | The Podman provider is experimental and needs a rootful Podman machine |
 
 ## 6. Health probe design
 
@@ -540,11 +540,11 @@ sequenceDiagram
 
 </details>
 
-Status: **Proposed** ([ADR 0009](adr/0009-keycloak-and-sso.md)). The design:
+Status: **Proposed**. The design:
 
 - **Keycloak** is deployed with the official **Keycloak Operator**. A `Keycloak` resource defines the server, and `KeycloakRealmImport` resources keep realms, clients,
   roles and groups as code. It uses a plain **PostgreSQL StatefulSet** (official `postgres` image, PVC) and is served at `sso.localtest.me`.
-  The Bitnami chart is not used. See [ADR 0009](adr/0009-keycloak-and-sso.md).
+  The Bitnami chart is not used: its maintained images moved to a paid catalog in 2025.
   - **`customers` realm:** self-registration, a public client `customer-web` (authorization code flow with PKCE), API audience `shop-api`, and roles `orders:read` and `orders:write`.
   - **`ops` realm:** groups `sre`, `dev` and `viewer`, with SSO across every monitoring UI.
 - **Ops UIs.** Grafana uses its **native Keycloak OAuth** and maps groups to Admin, Editor or Viewer with `role_attribute_path`. The gateway only routes it.
@@ -573,7 +573,7 @@ Status: **Proposed** ([ADR 0009](adr/0009-keycloak-and-sso.md)). The design:
 | Multi-cluster | One kind cluster | Agents in each cluster add `cluster` and `env` labels. A central or regional backend with multi-tenancy (`X-Scope-OrgID`). |
 | Security | Open UIs (Phase 6 adds SSO) | mTLS or authentication on OTLP endpoints (Collector `auth` extensions), network segmentation, secrets in a vault, PII redaction in the Collector |
 | Cost and cardinality | Low retention | Attribute allow-lists (`transform` and `filter` processors), limits per tenant, monitoring of active series, sampling, and log level and volume budgets |
-| Delivery | Makefile + helmfile | CI (lint, test, Trivy, multi-arch images to GHCR) and **Argo CD** GitOps. See [`.github/workflows/README.md`](../.github/workflows/README.md). |
+| Delivery | Makefile + helmfile | CI (lint, test, Trivy, multi-arch images to GHCR, a kind end-to-end smoke test) and **Argo CD** pull-based GitOps |
 
 ## 12. Risks and mitigations
 
