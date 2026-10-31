@@ -1,7 +1,8 @@
 # Services
 
 Three small FastAPI services (Python 3.12) that generate realistic telemetry for the Service Health
-Dashboard, plus a shared library that sets up OpenTelemetry, logging, health probes and fault injection.
+Dashboard, a shared library that sets up OpenTelemetry, logging, health probes and fault injection, and
+(Phase 4) the [Status API](#status-api) that turns that telemetry into an UP / DEGRADED / DOWN contract.
 
 | Directory | Package | `service.name` | Purpose |
 |---|---|---|---|
@@ -9,6 +10,7 @@ Dashboard, plus a shared library that sets up OpenTelemetry, logging, health pro
 | `user-service/` | `user_service` | `user` | `GET /users/{id}` from a seeded in-memory directory |
 | `order-service/` | `order_service` | `order` | `POST /orders`, `GET /orders/{id}`. Calls User, then Payment |
 | `payment-service/` | `payment_service` | `payment` | `POST /payments`, idempotent by `Idempotency-Key` |
+| `status-api/` | `status_api` | `status-api` | Phase 4: read-only status contract over Prometheus and Alertmanager ([below](#status-api)) |
 
 `service.name` uses the short names (`user`, `order`, `payment`) that the architecture document uses in
 queries and in the Status API. Stores are in memory, so there are no database spans and data is lost on restart.
@@ -176,9 +178,87 @@ the [standard `OTEL_*` variables](https://opentelemetry.io/docs/specs/otel/confi
 | `UPSTREAM_CONNECT_TIMEOUT_SECONDS` | 1 | order |
 | `PAYMENT_APPROVAL_LIMIT` | 5000 | payment |
 
+## Status API
+
+`status-api/` is the backend for frontend of the status page ([ADR 0006](../docs/adr/0006-status-api-bff-and-status-page.md),
+[architecture §8](../docs/architecture.md#8-status-api-contract)). It uses `shd_telemetry` like the other services (OTel traces and
+metrics, JSON logs, `/livez`, `/readyz`, graceful shutdown), queries the
+[Prometheus HTTP API](https://prometheus.io/docs/prometheus/latest/querying/api/) (`/api/v1/query`, `/api/v1/query_range`) and the
+[Alertmanager v2 API](https://github.com/prometheus/alertmanager/blob/main/api/v2/openapi.yaml) (`/api/v2/alerts?active=true&silenced=false&inhibited=false`)
+with an instrumented `httpx` client, and serves the result read-only. OpenAPI docs: `/docs` (cluster-internal only).
+
+| Method and path | Response |
+|---|---|
+| `GET /api/v1/services` | `ServicesResponse` (below), `Cache-Control: no-store` |
+| `GET /api/v1/services/{name}` | One `ServiceStatus`; 404 for a name that is not configured |
+| `GET /api/v1/alerts` | `{"alerts": [Alert], "source": Source, "generated_at"}`: active alerts, critical first, without `severity` `none`/`info` |
+| `GET /livez`, `GET /readyz` | Probes. `/readyz` never depends on Prometheus or Alertmanager: the API keeps answering (with `UNKNOWN`) when they are down |
+
+```jsonc
+{
+  "status": "DEGRADED",                        // worst service status: DOWN > DEGRADED > UNKNOWN > UP
+  "services": [{
+    "name": "payment",
+    "status": "DEGRADED",                      // UP | DEGRADED | DOWN | UNKNOWN
+    "reasons": ["5xx error ratio 7.8% > 5.0% (5m)"],   // empty when UP, worst first
+    "metrics": {
+      "probe_success": true,                   // blackbox GET /readyz (null: no probe result)
+      "ready_replicas": 1, "desired_replicas": 1,      // kube-state-metrics
+      "rps": 2.0,                              // requests/s, 5 m; /admin excluded
+      "error_ratio_5m": 0.0781,                // share of 5xx (0-1), 5 m; null without traffic
+      "latency_p95_ms": 4.9                    // p95 of http.server.request.duration, 5 m
+    },
+    "series": {                                // last 30 min, 1-min step, 1-min windows (sparklines)
+      "rps": [{"t": 1793485800, "v": 2.0}], "error_ratio": [...], "latency_p95_ms": [...]
+    },
+    "alerts": [],                              // this service's active alerts (Alert, below)
+    "links": {"dashboard": "http://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=payment"},
+    "updated_at": "2026-10-31T22:31:15Z"       // last successful Prometheus read (kept while it is down)
+  }],
+  "sources": {                                 // health of the two backends
+    "prometheus":   {"status": "ok", "error": null, "last_success_at": "..."},
+    "alertmanager": {"status": "unavailable", "error": "alertmanager: ConnectError", "last_success_at": "..."}
+  },
+  "thresholds": {"error_ratio": 0.05, "latency_p95_ms": 500.0},
+  "links": {"grafana": "http://grafana.localtest.me", "overview_dashboard": "http://grafana.localtest.me/d/shd-overview/service-health-overview"},
+  "generated_at": "2026-10-31T22:31:15Z"
+}
+```
+
+`Alert`: `name`, `service` (or `null` when the alert is not about one of the services), `severity`, `summary`, `description`,
+`runbook_url`, `starts_at`. An alert belongs to a service through its `service` (or `service_name`) label, or for generic
+Kubernetes rules through `namespace` plus `deployment` or `container`, so the Phase 5 rules need no changes in the API.
+
+**Status rules** (`status_api/rules.py`, all evaluated, worst wins): `DOWN` if the probe fails or a `critical` alert fires;
+`DEGRADED` if a `warning` alert fires, the 5xx ratio is above 5% or p95 above 500 ms over 5 minutes, or fewer replicas are ready
+than desired; `UNKNOWN` if Prometheus is unreachable or there is no probe result; otherwise `UP`. The thresholds are those of
+the alert rules. The PromQL is in `status_api/queries.py`; the Grafana dashboards use the same expressions.
+
+**Protecting the backends.** One snapshot (6 instant and 3 range queries, plus one Alertmanager call, all concurrent) is cached
+for `CACHE_TTL_SECONDS`; concurrent requests during a refresh wait for the same refresh (single flight). Every call has a
+`QUERY_TIMEOUT_SECONDS` timeout, also passed to Prometheus as `timeout`. Any network error, timeout, HTTP error or error payload
+marks that source `unavailable` instead of failing the request.
+
+| Variable | Default (chart value) |
+|---|---|
+| `PROMETHEUS_URL` | `http://localhost:9090` (`http://kps-prometheus.observability.svc:9090`) |
+| `ALERTMANAGER_URL` | `http://localhost:9093` (`http://kps-alertmanager.observability.svc:9093`) |
+| `STATUS_SERVICES`, `STATUS_NAMESPACE` | `user,order,payment`, `apps`. Names must match `^[a-z0-9][a-z0-9-]*$` (they go into PromQL) |
+| `CACHE_TTL_SECONDS`, `QUERY_TIMEOUT_SECONDS` | 10, 3 |
+| `ERROR_RATIO_THRESHOLD`, `LATENCY_P95_THRESHOLD_MS` | 0.05, 500 |
+| `SERIES_MINUTES`, `SERIES_STEP_SECONDS` | 30, 60 |
+| `GRAFANA_URL` | `http://grafana.localtest.me` |
+
+Run it against the cluster: `kubectl -n observability port-forward svc/kps-prometheus 9090` (and `svc/kps-alertmanager 9093`), then
+`OTEL_TRACES_EXPORTER=none OTEL_METRICS_EXPORTER=none uv run status-api`. Tests (`tests/test_status_api.py`, 37 cases) replace both backends with
+an `httpx.MockTransport`: every rule, unreachable, failing or malformed backends (UNKNOWN, never 500), stale data, the cache TTL and single flight,
+alert matching, and PromQL-injection-safe settings.
+
+The status page that consumes this API is in [`web/`](../web/README.md).
+
 ## Container images
 
-A single multi-stage `services/Dockerfile` builds every service (`--build-arg SERVICE=<dir>`; the build context is the repository root):
+A single multi-stage `services/Dockerfile` builds every service, including the Status API, (`--build-arg SERVICE=<dir>`; the build context is the repository root):
 
 - The builder stage uses `uv sync --frozen --no-dev --no-editable`. Dependencies are installed in their own cached layer, and the workspace
   packages are installed as wheels. Only `/app/.venv` is copied into the runtime stage, so there are no sources, no build tools and no dev dependencies.

@@ -42,3 +42,8 @@ envoyPodMonitor:
   namespace: envoy-gateway-system
   gatewayName: edge
   interval: 30s
+
+# Grafana dashboards (dashboards/*.json): Service Health Overview and Service Detail. Deliberately
+# only these two; everything else is ad-hoc in Explore and the Drilldown apps.
+dashboards:
+  enabled: true

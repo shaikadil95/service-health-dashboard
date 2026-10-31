@@ -9,6 +9,11 @@ image:
   # The images are loaded into the kind node (`make images`), never pulled from a registry.
   pullPolicy: IfNotPresent
 
+# The image is a Python service built on shd_telemetry (services/). It reads PORT, LOG_LEVEL,
+# SHUTDOWN_*, FAULT_* and the OTEL_* variables, which the chart then sets. false for other images,
+# for example the static status page (nginx), which only gets `env`.
+shdRuntime: true
+
 replicaCount: 1
 revisionHistoryLimit: 3
 
@@ -81,6 +86,12 @@ otel:
     endpoint: http://otel-collector.observability.svc.cluster.local:4317
     protocol: grpc
   metricExportIntervalMs: 15000
+
+# emptyDir mounted at /tmp, for images that need a writable /tmp with a read-only root
+# filesystem (nginx keeps its pid file and temp files there). The Python images write nothing.
+tmpVolume:
+  enabled: false
+  sizeLimit: 16Mi
 
 podSecurityContext:
   runAsNonRoot: true

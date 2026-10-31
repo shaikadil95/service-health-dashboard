@@ -1,6 +1,7 @@
 # Service Health Dashboard. Run `make help` for targets.
 # Phase 1: services (uv, compose). Phase 2: local Kubernetes platform (kind, Helm, helmfile).
 # Phase 3: telemetry pipeline and storage (Collector, Prometheus, Loki, Tempo, Grafana, k6).
+# Phase 4: Grafana correlations and dashboards, Status API and status page (web/, pnpm).
 
 SHELL := /usr/bin/env bash
 .SHELLFLAGS := -euo pipefail -c
@@ -10,11 +11,14 @@ SHELL := /usr/bin/env bash
 # Override with `make ENGINE=docker ...`.
 ENGINE ?= $(shell podman info >/dev/null 2>&1 && echo podman || echo docker)
 COMPOSE ?= $(ENGINE) compose
-SERVICES := user-service order-service payment-service
+SERVICES := user-service order-service payment-service status-api
+# Static web apps in the pnpm monorepo web/ (image <app>-web, served by nginx-unprivileged).
+WEB_APPS := status
 IMAGE_PREFIX ?= localhost/shd
 IMAGE_TAG ?= dev
 COLLECTOR_IMAGE := $(shell awk '/opentelemetry-collector-contrib:/ {print $$2}' compose.yaml)
 SERVICE_IMAGES := $(foreach svc,$(SERVICES),$(IMAGE_PREFIX)/$(svc):$(IMAGE_TAG))
+WEB_IMAGES := $(foreach app,$(WEB_APPS),$(IMAGE_PREFIX)/$(app)-web:$(IMAGE_TAG))
 
 .PHONY: help
 help: ## Show this help
@@ -42,12 +46,35 @@ test: sync ## Run the unit tests
 	uv run pytest
 
 .PHONY: build
-build: ## Build the service images with the container engine
+build: ## Build the service and web images with the container engine
 	@for svc in $(SERVICES); do \
 	  echo "==> $(IMAGE_PREFIX)/$$svc:$(IMAGE_TAG)"; \
 	  $(ENGINE) build -f services/Dockerfile --build-arg SERVICE=$$svc \
 	    -t $(IMAGE_PREFIX)/$$svc:$(IMAGE_TAG) . ; \
 	done
+	@for app in $(WEB_APPS); do \
+	  echo "==> $(IMAGE_PREFIX)/$$app-web:$(IMAGE_TAG)"; \
+	  $(ENGINE) build -f web/Dockerfile --build-arg APP=$$app \
+	    -t $(IMAGE_PREFIX)/$$app-web:$(IMAGE_TAG) web ; \
+	done
+
+##@ Web (Phase 4, needs Node >= 20.19 and pnpm; the images build without them)
+
+PNPM ?= pnpm
+WEB_ENV := TURBO_TELEMETRY_DISABLED=1
+
+.PHONY: web-install
+web-install: ## Install the web monorepo dependencies (pnpm, frozen lockfile)
+	cd web && $(PNPM) install --frozen-lockfile
+
+.PHONY: web-check
+web-check: web-install ## Web: Prettier check, ESLint, typecheck, Vitest and production build
+	cd web && $(PNPM) format:check
+	cd web && $(WEB_ENV) $(PNPM) exec turbo lint typecheck test build --output-logs=errors-only
+
+.PHONY: web-dev
+web-dev: web-install ## Status page dev server; /api is proxied to STATUS_API_URL (default http://status.localtest.me)
+	cd web && $(PNPM) --filter status dev
 
 # Images are built and pulled with the engine CLI, then compose runs with --no-build. This also
 # avoids compose needing Docker credential helpers when it talks to Podman.
@@ -148,8 +175,8 @@ define kind_load
 endef
 
 .PHONY: images
-images: build ## Build the service images and load them into the kind cluster
-	$(call kind_load,$(SERVICE_IMAGES))
+images: build ## Build the service and web images and load them into the kind cluster
+	$(call kind_load,$(SERVICE_IMAGES) $(WEB_IMAGES))
 
 # Image for the in-cluster checks of `make verify`. Pulled by the engine and loaded into kind, so
 # the check does not depend on registry access from inside the node.
@@ -202,6 +229,7 @@ status: ## Show nodes, gateway, routes and workloads
 	@echo; $(KUBECTL_KIND) -n observability get pods,pvc
 	@echo; $(KUBECTL_KIND) -n loadgen get deploy
 	@echo; echo "API: http://api.localtest.me/orders  (POST/GET), http://api.localtest.me/users/u-1001"
+	@echo "Status page: http://status.localtest.me (API: http://status.localtest.me/api/v1/services)"
 	@echo "UIs: http://grafana.localtest.me (admin, password: make grafana-password), http://prometheus.localtest.me, http://alertmanager.localtest.me"
 
 .PHONY: grafana-password
@@ -218,14 +246,15 @@ load-stop: ## Stop the k6 load generator
 	$(KUBECTL_KIND) -n loadgen scale deployment/loadgen --replicas=0
 
 .PHONY: verify
-verify: verify-image ## Automated platform (Phase 2) and telemetry (Phase 3) checks against the running cluster
+verify: verify-image ## Automated platform (2), telemetry (3) and visualization (4) checks against the running cluster
 	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify.sh
 	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) deploy/scripts/verify-telemetry.sh
+	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify-status.sh
 
 .PHONY: lint-charts
 lint-charts: ## helm lint and render the local charts with every values file
 	helm lint --strict deploy/charts/edge deploy/charts/namespace-baseline deploy/charts/observability-config loadgen
-	@for svc in user order payment; do \
+	@for svc in user order payment status-api status-web; do \
 	  helm lint --strict deploy/charts/microservice -f deploy/values/$$svc.yaml && \
 	  helm template $$svc deploy/charts/microservice -n apps -f deploy/values/$$svc.yaml > /dev/null || exit 1; \
 	done
