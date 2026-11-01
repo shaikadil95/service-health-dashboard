@@ -12,11 +12,11 @@ export default defineConfig({
     },
   },
   server: {
-    // `pnpm dev`: same-origin /api like behind the gateway, e.g.
-    // STATUS_API_URL=http://localhost:8080 (uv run status-api) or http://status.localtest.me
+    // `pnpm dev`: same-origin /api like behind the gateway. Default: a local Status API
+    // (`uv run status-api`), because status.localtest.me requires single sign-on since Phase 6.
     proxy: {
       "/api": {
-        target: process.env.STATUS_API_URL ?? "http://status.localtest.me",
+        target: process.env.STATUS_API_URL ?? "http://localhost:8080",
         changeOrigin: true,
       },
     },

@@ -55,12 +55,26 @@ export type AlertsResponse = {
   generated_at: string
 }
 
+/** The single sign-on session of the gateway expired: a full page load starts a new login. */
+export class SessionExpiredError extends Error {
+  constructor() {
+    super("Your session has expired")
+    this.name = "SessionExpiredError"
+  }
+}
+
 // Same origin: the gateway routes /api on status.localtest.me to the Status API (no CORS).
+// X-Requested-With makes the gateway's OIDC filter answer 401 instead of redirecting an expired
+// session to the login page, which fetch() could not follow (Phase 6).
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, {
     signal,
-    headers: { Accept: "application/json" },
+    credentials: "same-origin",
+    headers: { Accept: "application/json", "X-Requested-With": "fetch" },
   })
+  if (response.status === 401) {
+    throw new SessionExpiredError()
+  }
   if (!response.ok) {
     throw new Error(`${path}: HTTP ${response.status}`)
   }

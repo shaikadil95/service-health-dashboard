@@ -1,0 +1,84 @@
+# Customer shop (web/apps/shop): static files served by nginx-unprivileged on shop.localtest.me.
+# Login and session are the gateway's (SecurityPolicy "shop", values/sso-apps.yaml): the page never
+# sees a token. Its same-origin API is routed by this release's HTTPRoute to the services, and the
+# gateway adds the customer's access token (forwardAccessToken):
+#   /api/orders -> order /orders      /api/me -> user /users/me
+image:
+  repository: localhost/shd/shop-web
+
+# nginx, not a Python service: no PORT/FAULT_*/OTEL_* variables, no OTLP export.
+shdRuntime: false
+otel:
+  exporter:
+    enabled: false
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    cpu: 200m
+    memory: 64Mi
+
+# nginx probes answered by nginx.conf itself.
+probes:
+  startup:
+    path: /livez
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 15
+  liveness:
+    path: /livez
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 2
+    successThreshold: 1
+
+# nginx-unprivileged: UID/GID 101, pid file and temp files in /tmp.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 101
+  runAsGroup: 101
+  fsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+tmpVolume:
+  enabled: true
+
+shutdown:
+  preStopSleepSeconds: 5
+  drainSeconds: 0
+  timeoutSeconds: 5
+  terminationGracePeriodSeconds: 15
+
+networkPolicy:
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: envoy
+          app.kubernetes.io/component: proxy
+          gateway.envoyproxy.io/owning-gateway-name: edge
+  otelCollector:
+    enabled: false
+  blackboxExporter:
+    enabled: false
+
+httpRoute:
+  enabled: true
+  hostnames: [shop.localtest.me]
+  pathPrefixes: [/]
+  extraRules:
+    - pathPrefix: /api/orders
+      service: order
+      replacePrefix: /orders
+    - pathPrefix: /api/me
+      service: user
+      replacePrefix: /users/me
