@@ -78,7 +78,7 @@ for d in status-api status-web; do
 done
 
 echo "== 2. Status page and Status API (https://$STATUS, signed in as viewer)"
-if sso_login viewer "$(url $STATUS /)" "$JAR"; then
+if sso_login viewer "$(url $STATUS /login)" "$JAR"; then
   ok "single sign-on as viewer (ops realm)"
 else
   ko "single sign-on as viewer failed"

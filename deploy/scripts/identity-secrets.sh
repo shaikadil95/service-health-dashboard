@@ -8,7 +8,7 @@
 #   identity/keycloak-admin       bootstrap admin of Keycloak's master realm (admin console)
 #   identity/realm-secrets        client secrets and demo user passwords, realm import placeholders
 #   observability/grafana-oauth   Grafana's client secret (ops realm)
-#   observability/ops-gateway-oidc, apps/ops-gateway-oidc   Envoy OIDC client secret (ops realm)
+#   envoy-gateway-system/ops-gateway-oidc   Envoy OIDC client secret of the engineers' session (ops realm)
 #   apps/shop-gateway-oidc        Envoy OIDC client secret of the shop (customers realm)
 #   apps/order-service-client     client credentials of the order service (customers realm)
 #   loadgen/loadgen-client        client credentials of k6 (customers realm)
@@ -54,8 +54,7 @@ admin_password=$(get identity keycloak-admin password)
 apply_secret identity keycloak-admin username=admin password="$admin_password"
 
 apply_secret observability grafana-oauth client-secret="$GRAFANA_SECRET"
-apply_secret observability ops-gateway-oidc client-secret="$OPS_GATEWAY_SECRET"
-apply_secret apps ops-gateway-oidc client-secret="$OPS_GATEWAY_SECRET"
+apply_secret envoy-gateway-system ops-gateway-oidc client-secret="$OPS_GATEWAY_SECRET"
 apply_secret apps shop-gateway-oidc client-secret="$SHOP_GATEWAY_SECRET"
 apply_secret apps order-service-client client-id=order-service client-secret="$ORDER_SERVICE_SECRET"
 apply_secret loadgen loadgen-client client-id=loadgen client-secret="$LOADGEN_SECRET"

@@ -7,6 +7,9 @@ kind: Keycloak
 metadata:
   name: keycloak
 spec:
+  {{- with .Values.keycloak.image }}
+  image: {{ . }}
+  {{- end }}
   instances: {{ .Values.keycloak.instances }}
   db:
     vendor: postgres
@@ -88,8 +91,7 @@ spec:
           seccompProfile:
             type: RuntimeDefault
         containers:
-          # The image is preloaded into kind (`make platform-images`); the operator would pull it on
-          # every start.
+          # The image is loaded into kind (`make images`); the operator would pull it on every start.
           - imagePullPolicy: IfNotPresent
             securityContext:
               allowPrivilegeEscalation: false

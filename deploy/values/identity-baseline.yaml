@@ -54,7 +54,7 @@ policies:
           - { port: 4317, protocol: TCP }
 
   # Keycloak to its own pods (Infinispan/JGroups cluster port 7800; the operator's policy denies that
-  # port to everything else).
+  # port to everything else), and SMTP to Mailpit (password-reset emails of the customers realm).
   allow-keycloak-egress:
     podSelector:
       matchLabels:
@@ -67,3 +67,12 @@ policies:
                 app: keycloak
         ports:
           - { port: 7800, protocol: TCP }
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: observability
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: mailpit
+        ports:
+          - { port: 1025, protocol: TCP }

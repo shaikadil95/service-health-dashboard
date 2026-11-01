@@ -37,7 +37,8 @@ clients:
       - https://status.localtest.me/oauth2/callback
     webOrigins: []
     attributes:
-      post.logout.redirect.uris: "https://prometheus.localtest.me/*##https://alertmanager.localtest.me/*##https://mail.localtest.me/*##https://status.localtest.me/*"
+      # Every logout of the engineers' gateway session ends on the landing page.
+      post.logout.redirect.uris: "https://home.localtest.me/*"
     protocolMappers:
       - name: groups
         protocol: openid-connect
@@ -70,7 +71,8 @@ clients:
     redirectUris: ["https://grafana.localtest.me/login/generic_oauth"]
     webOrigins: ["https://grafana.localtest.me"]
     attributes:
-      post.logout.redirect.uris: "https://grafana.localtest.me/login"
+      # Grafana's sign-out (signout_redirect_url) ends the Keycloak session and lands on the home page.
+      post.logout.redirect.uris: "https://home.localtest.me/*##https://grafana.localtest.me/login"
       pkce.code.challenge.method: S256
     protocolMappers:
       - name: groups

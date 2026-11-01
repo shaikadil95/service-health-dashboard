@@ -3,11 +3,20 @@
 realm: customers
 displayName: Service Health Shop
 enabled: true
+# Branded login, registration, password reset and error pages (Keycloakify, web/apps/keycloak-theme),
+# shipped in the custom Keycloak image. The ops realm keeps Keycloak's default theme.
+loginTheme: shd-shop
 sslRequired: external
 registrationAllowed: true
 loginWithEmailAllowed: true
 duplicateEmailsAllowed: false
-resetPasswordAllowed: false
+resetPasswordAllowed: true
+# Password-reset emails go to Mailpit (https://mail.localtest.me), the demo's only mail server.
+smtpServer:
+  host: mailpit.observability.svc
+  port: "1025"
+  from: shop@shd.localtest.me
+  fromDisplayName: Service Health Shop
 verifyEmail: false
 rememberMe: false
 bruteForceProtected: true
@@ -79,7 +88,8 @@ clients:
     redirectUris: ["https://shop.localtest.me/oauth2/callback"]
     webOrigins: []
     attributes:
-      post.logout.redirect.uris: "https://shop.localtest.me/*"
+      # After the gateway's logout path, Keycloak sends the customer to the landing page.
+      post.logout.redirect.uris: "https://home.localtest.me/*##https://shop.localtest.me/*"
     protocolMappers:
       - name: audience-shop-api
         protocol: openid-connect

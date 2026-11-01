@@ -19,3 +19,15 @@ spec:
       backendRefs:
         - name: keycloak-service
           port: 8080
+---
+# Public: the listener-level engineers' login (values/sso-edge.yaml) must never apply to Keycloak
+# itself. A route-level policy without authentication replaces it for this route.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: keycloak-public
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: keycloak

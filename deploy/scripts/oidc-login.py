@@ -35,6 +35,21 @@ import urllib.parse
 import urllib.request
 
 FORM = re.compile(r'<form[^>]*id="kc-form-login"[^>]*action="([^"]+)"', re.S)
+# Keycloakify themes (the customers realm, Phase 6b) render the form in the browser from the page's
+# kcContext; the form's action is its url.loginAction.
+KC_CONTEXT_ACTION = re.compile(r'"?loginAction"?\s*:\s*"([^"]+)"')
+
+
+def login_action(body: str) -> str | None:
+    """The login form's action: the server-rendered form, or a Keycloakify page's kcContext."""
+    match = FORM.search(body)
+    if match:
+        return html.unescape(match.group(1))
+    match = KC_CONTEXT_ACTION.search(body)
+    if match:
+        raw = match.group(1).replace("\\/", "/")
+        return html.unescape(raw.encode().decode("unicode_escape"))
+    return None
 
 
 def pin_localtest(address: str) -> None:
@@ -85,14 +100,13 @@ def main() -> int:
     )
 
     status, url, body = fetch(opener, args.urls[0])
-    match = FORM.search(body)
-    if not match or ("/protocol/openid-connect/" not in url and "/login-actions/" not in url):
+    action = login_action(body)
+    if not action or ("/protocol/openid-connect/" not in url and "/login-actions/" not in url):
         print(f"no login page: {status} {url}", file=sys.stderr)
         return 2
-    action = html.unescape(match.group(1))
     form = urllib.parse.urlencode({"username": username, "password": password, "credentialId": ""})
     status, url, body = fetch(opener, action, form.encode())
-    if FORM.search(body):
+    if login_action(body) and "/login-actions/" in url:
         error = re.search(r'id="input-error[^"]*"[^>]*>\s*([^<]+)', body)
         print(f"login failed: {error.group(1).strip() if error else status}", file=sys.stderr)
         return 3
@@ -108,6 +122,11 @@ def main() -> int:
         snippet = " ".join(body.split())[:200]
         print(f"{status} POST {target} {snippet}")
     if args.cookie_jar:
+        # Session cookies (e.g. Keycloak's KEYCLOAK_IDENTITY) need expiry 0 in the Netscape format:
+        # curl skips lines with an empty expiry field, which is what Python writes for them.
+        for cookie in jar:
+            if cookie.expires is None:
+                cookie.expires = 0
         jar.save(ignore_discard=True, ignore_expires=True)
     return 0
 

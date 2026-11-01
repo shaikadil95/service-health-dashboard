@@ -76,6 +76,7 @@ redirect:
     - status.localtest.me
     - shop.localtest.me
     - sso.localtest.me
+    - home.localtest.me
 
 backends:
   # 0 disables Envoy's panic mode, so endpoints that are not ready never receive traffic.
