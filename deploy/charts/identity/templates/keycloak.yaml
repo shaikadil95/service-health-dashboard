@@ -1,0 +1,99 @@
+# Keycloak server, managed by the Keycloak Operator. https://www.keycloak.org/operator/basic-deployment
+# TLS ends at the gateway (edge termination): Keycloak serves plain HTTP inside the cluster and trusts
+# the X-Forwarded-* headers of Envoy. The operator's NetworkPolicy therefore lets only the Envoy
+# proxies reach the HTTP port, so no other pod can spoof those headers.
+apiVersion: k8s.keycloak.org/v2beta1
+kind: Keycloak
+metadata:
+  name: keycloak
+spec:
+  {{- with .Values.keycloak.image }}
+  image: {{ . }}
+  {{- end }}
+  instances: {{ .Values.keycloak.instances }}
+  db:
+    vendor: postgres
+    host: postgres
+    port: 5432
+    database: keycloak
+    usernameSecret: { name: {{ .Values.secrets.database }}, key: username }
+    passwordSecret: { name: {{ .Values.secrets.database }}, key: password }
+  bootstrapAdmin:
+    user:
+      secret: {{ .Values.secrets.admin }}
+  http:
+    httpEnabled: true
+  hostname:
+    # Hostname v2: the full public URL. Tokens carry iss=https://{{ .Values.hostname }}/realms/<realm>.
+    hostname: https://{{ .Values.hostname }}
+    strict: true
+  proxy:
+    headers: xforwarded
+  # Exposed through the Gateway API (templates/httproute.yaml), not an Ingress.
+  ingress:
+    enabled: false
+  networkPolicy:
+    enabled: true
+    http:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: {{ .Values.gateway.namespace }}
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/component: proxy
+            gateway.envoyproxy.io/owning-gateway-name: {{ .Values.gateway.name }}
+    # Metrics and health on the management port (9000): Prometheus only (probes come from the node).
+    management:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: observability
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: prometheus
+  # Metrics (/metrics on 9000) with HTTP histograms and user event metrics (logins, failures); the
+  # operator creates the ServiceMonitor. https://www.keycloak.org/observability/event-metrics
+  features:
+    enabled: [user-event-metrics]
+  additionalOptions:
+    - name: metrics-enabled
+      value: "true"
+    - name: http-metrics-histograms-enabled
+      value: "true"
+    - name: event-metrics-user-enabled
+      value: "true"
+    # Failed attempts are the same events with an `error` label (e.g. invalid_user_credentials).
+    - name: event-metrics-user-events
+      value: login,client_login,code_to_token,refresh_token,logout,register
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+  tracing:
+    enabled: {{ .Values.keycloak.tracing.enabled }}
+    endpoint: {{ .Values.keycloak.tracing.endpoint }}
+    samplerType: parentbased_traceidratio
+    samplerRatio: {{ .Values.keycloak.tracing.samplerRatio }}
+  telemetry:
+    serviceName: keycloak
+    resourceAttributes:
+      deployment.environment.name: kind
+      k8s.namespace.name: {{ .Release.Namespace }}
+  resources:
+    {{- toYaml .Values.keycloak.resources | nindent 4 }}
+  # The server does not call the Kubernetes API (no external Infinispan, no Kubernetes identity
+  # provider); one instance, so no cluster discovery either.
+  automountServiceAccountToken: false
+  # Pod Security "restricted" (the namespace enforces it).
+  unsupported:
+    podTemplate:
+      spec:
+        securityContext:
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        containers:
+          # The image is loaded into kind (`make images`); the operator would pull it on every start.
+          - imagePullPolicy: IfNotPresent
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: [ALL]

@@ -1,0 +1,588 @@
+{
+  "uid": "shd-overview",
+  "title": "Service Health Overview",
+  "description": "Status, traffic, errors and latency of the User, Order and Payment services, and firing alerts.",
+  "tags": [
+    "service-health-dashboard"
+  ],
+  "editable": false,
+  "graphTooltip": 1,
+  "schemaVersion": 41,
+  "version": 1,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "browser",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "title": "Service detail",
+      "type": "link",
+      "url": "/d/shd-service-detail/service-detail",
+      "keepTime": true,
+      "icon": "dashboard"
+    },
+    {
+      "title": "Status page",
+      "type": "link",
+      "url": "https://status.localtest.me",
+      "targetBlank": true,
+      "icon": "external link"
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Status",
+      "description": "DOWN: blackbox probe of /readyz fails. DEGRADED: 5xx ratio > 5% or p95 > 500 ms over 5 minutes (the alert thresholds). Otherwise UP. The Status API applies the same rules plus firing alerts.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "min by (service) (\n  label_replace(2 * min by (service) (probe_success{namespace=\"apps\", service=~\"user|order|payment\"}), \"check\", \"probe\", \"\", \"\")\n  or label_replace(label_replace(((sum by (service_name) (rate(http_server_request_duration_seconds_count{k8s_namespace_name=\"apps\", service_name=~\"user|order|payment\", http_route!~\"/admin/.*\", http_response_status_code=~\"5..\"}[5m])) or sum by (service_name) (rate(http_server_request_duration_seconds_count{k8s_namespace_name=\"apps\", service_name=~\"user|order|payment\", http_route!~\"/admin/.*\"}[5m])) * 0) / sum by (service_name) (rate(http_server_request_duration_seconds_count{k8s_namespace_name=\"apps\", service_name=~\"user|order|payment\", http_route!~\"/admin/.*\"}[5m])) > 0.05) * 0 + 1, \"service\", \"$1\", \"service_name\", \"(.+)\"), \"check\", \"errors\", \"\", \"\")\n  or label_replace(label_replace((histogram_quantile(0.95, sum by (service_name, le) (rate(http_server_request_duration_seconds_bucket{k8s_namespace_name=\"apps\", service_name=~\"user|order|payment\", http_route!~\"/admin/.*\"}[5m]))) > 0.5) * 0 + 1, \"service\", \"$1\", \"service_name\", \"(.+)\"), \"check\", \"latency\", \"\", \"\")\n)",
+          "legendFormat": "{{service}}",
+          "refId": "A",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "DEGRADED",
+                  "color": "orange",
+                  "index": 1
+                },
+                "2": {
+                  "text": "UP",
+                  "color": "green",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "noValue": "UNKNOWN",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 2
+              }
+            ]
+          },
+          "links": [
+            {
+              "title": "Service detail",
+              "url": "/d/shd-service-detail/service-detail?var-service=${__field.labels.service}&${__url_time_range}"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "orientation": "vertical",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Request rate",
+      "description": "Server requests per second (OTel http.server.request.duration count), /admin excluded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0,
+          "links": [
+            {
+              "title": "Service detail: ${__field.labels.service_name}",
+              "url": "/d/shd-service-detail/service-detail?var-service=${__field.labels.service_name}&${__url_time_range}"
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (service_name) (rate(http_server_request_duration_seconds_count{k8s_namespace_name=\"apps\", service_name=~\"user|order|payment\", http_route!~\"/admin/.*\"}[$__rate_interval]))",
+          "legendFormat": "{{service_name}}",
+          "refId": "A",
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Error % (5xx)",
+      "description": "Share of responses with status 5xx. Dashed line: alert threshold 5%. 4xx (client errors, declined payments) are not errors here.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "min": 0,
+          "links": [
+            {
+              "title": "Service detail: ${__field.labels.service_name}",
+              "url": "/d/shd-service-detail/service-detail?var-service=${__field.labels.service_name}&${__url_time_range}"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum by (service_name) (rate(http_server_request_duration_seconds_count{k8s_namespace_name=\"apps\", service_name=~\"user|order|payment\", http_route!~\"/admin/.*\", http_response_status_code=~\"5..\"}[$__rate_interval])) or sum by (service_name) (rate(http_server_request_duration_seconds_count{k8s_namespace_name=\"apps\", service_name=~\"user|order|payment\", http_route!~\"/admin/.*\"}[$__rate_interval])) * 0) / sum by (service_name) (rate(http_server_request_duration_seconds_count{k8s_namespace_name=\"apps\", service_name=~\"user|order|payment\", http_route!~\"/admin/.*\"}[$__rate_interval]))",
+          "legendFormat": "{{service_name}}",
+          "refId": "A",
+          "range": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "p95 latency",
+      "description": "95th percentile server latency. Dashed line: alert threshold 500 ms. Dots are exemplars: click one to open its trace in Tempo.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "min": 0,
+          "links": [
+            {
+              "title": "Service detail: ${__field.labels.service_name}",
+              "url": "/d/shd-service-detail/service-detail?var-service=${__field.labels.service_name}&${__url_time_range}"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (service_name, le) (rate(http_server_request_duration_seconds_bucket{k8s_namespace_name=\"apps\", service_name=~\"user|order|payment\", http_route!~\"/admin/.*\"}[$__rate_interval])))",
+          "legendFormat": "{{service_name}}",
+          "refId": "A",
+          "range": true,
+          "exemplar": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Firing alerts",
+      "description": "Prometheus alerts in state firing with severity critical or warning (Watchdog and info alerts are not shown). Routing and notification: Alertmanager.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sort_desc(max by (alertname, severity, service, namespace) (ALERTS{alertstate=\"firing\", severity=~\"critical|warning\"}))",
+          "legendFormat": "",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No firing alerts",
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "severity"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "critical": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "warning": {
+                        "color": "orange",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true
+            },
+            "indexByName": {
+              "severity": 0,
+              "alertname": 1,
+              "service": 2,
+              "namespace": 3
+            },
+            "renameByName": {
+              "alertname": "Alert"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Sign-ins (Keycloak)",
+      "description": "Keycloak user events per realm (Phase 6): successful and failed browser logins and client-credentials token requests. Failed logins drive LoginFailureSpike.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum by (realm) (rate(keycloak_user_events_total{event=\"login\", error=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{realm}} logins",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum by (realm) (rate(keycloak_user_events_total{event=\"login\", error!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{realm}} failed logins",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum by (realm) (rate(keycloak_user_events_total{event=\"client_login\"}[$__rate_interval]))",
+          "legendFormat": "{{realm}} client credentials",
+          "refId": "C"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Rejected requests (401/403)",
+      "description": "Authentication and authorization failures, kept apart from 5xx (they never count as errors): missing or invalid tokens rejected by the gateway's JWT filter (401), requests denied by the gateway's group rules (403), and tokens rejected by the services themselves (shd_telemetry auth.failures).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum(rate(envoy_http_jwt_authn_denied[$__rate_interval]))",
+          "legendFormat": "gateway 401 (JWT)",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum(rate(envoy_http_rbac_denied[$__rate_interval]))",
+          "legendFormat": "gateway 403 (groups)",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum by (service_name, http_response_status_code) (rate(auth_failures_total[$__rate_interval]))",
+          "legendFormat": "{{service_name}} {{http_response_status_code}}",
+          "refId": "C"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

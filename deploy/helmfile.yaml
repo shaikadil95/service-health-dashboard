@@ -1,0 +1,268 @@
+# Releases of the local platform. `make deploy` runs `helmfile apply` after creating the namespaces
+# (and the Grafana admin Secret) and before patching CoreDNS (see deploy/README.md). Requires Helm 4
+# and the helm-diff plugin. One release per component, ordered with `needs`; every chart version is
+# pinned.
+
+repositories:
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+  # Loki and Tempo charts: maintained in grafana-community since 2026 (the Grafana docs point there).
+  - name: grafana-community
+    url: https://grafana-community.github.io/helm-charts
+  - name: open-telemetry
+    url: https://open-telemetry.github.io/opentelemetry-helm-charts
+
+helmDefaults:
+  kubeContext: kind-shd
+  wait: true
+  waitForJobs: true
+  timeout: 600 # first installs pull images; `make platform-images` preloads most of them
+  createNamespace: true
+
+releases:
+  # --- Edge -------------------------------------------------------------------------------------
+  - name: envoy-gateway
+    namespace: envoy-gateway-system
+    chart: oci://docker.io/envoyproxy/gateway-helm
+    version: v1.9.3
+    labels: { tier: edge }
+    values:
+      - values/envoy-gateway.yaml
+
+  # cert-manager with its CRDs (Phase 6): the ClusterIssuer and the *.localtest.me Certificate of the
+  # HTTPS listener live in the edge release. Needs the Prometheus Operator CRDs for its ServiceMonitor.
+  - name: cert-manager
+    namespace: cert-manager
+    chart: oci://quay.io/jetstack/charts/cert-manager
+    version: v1.21.3
+    labels: { tier: edge }
+    needs: [observability/prometheus-operator-crds]
+    disableValidationOnInstall: true # ServiceMonitor
+    values:
+      - values/cert-manager.yaml
+
+  - name: edge
+    namespace: envoy-gateway-system
+    chart: ./charts/edge
+    labels: { tier: edge }
+    # Its CRs (EnvoyProxy, GatewayClass, Gateway, ClusterIssuer, Certificate) use CRDs that the
+    # envoy-gateway and cert-manager releases install, so on a fresh cluster helm-diff must not
+    # validate them against the API server yet. disableValidation also covers an upgrade of a
+    # cluster that predates cert-manager (Phase 5 -> 6), where the release exists already.
+    disableValidation: true
+    needs:
+      - envoy-gateway-system/envoy-gateway
+      - cert-manager/cert-manager
+
+  # --- Applications (namespace "apps") ---------------------------------------------------------
+  - name: apps-baseline
+    namespace: apps
+    chart: ./charts/namespace-baseline
+    labels: { tier: apps }
+
+  - name: user
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/apps-baseline]
+    disableValidationOnInstall: true # HTTPRoute CRD comes from the envoy-gateway release
+    values: [values/user.yaml]
+
+  - name: payment
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [apps/apps-baseline]
+    values: [values/payment.yaml]
+
+  - name: order
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/user, apps/payment]
+    disableValidationOnInstall: true
+    values: [values/order.yaml]
+
+  # Status page (Phase 4): static SPA and its backend for frontend on status.localtest.me. The
+  # Status API reports UNKNOWN while Prometheus or Alertmanager are not there yet, so it does not
+  # wait for the observability releases.
+  - name: status-api
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/apps-baseline]
+    disableValidationOnInstall: true
+    values: [values/status-api.yaml]
+
+  - name: status-web
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/apps-baseline]
+    disableValidationOnInstall: true
+    values: [values/status-web.yaml]
+
+  # Customer shop page (Phase 6) on shop.localtest.me; its /api routes go to order and user.
+  - name: shop-web
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/apps-baseline, apps/order, apps/user]
+    disableValidationOnInstall: true
+    values: [values/shop-web.yaml]
+
+  # Public landing page (Phase 6b) on home.localtest.me: links to the shop and the engineers' tools,
+  # the logout buttons, and where every logout ends.
+  - name: home-web
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/apps-baseline]
+    disableValidationOnInstall: true
+    values: [values/home-web.yaml]
+
+  # Edge authentication of the routes in "apps" (Phase 6): JWT on api.localtest.me, the shop's own
+  # OIDC login, the status page's data in the engineers' session (sso-edge), public routes. Needs the
+  # routes it targets and Keycloak for the JWKS.
+  - name: sso-apps
+    namespace: apps
+    chart: ./charts/sso
+    labels: { tier: apps }
+    needs: [apps/user, apps/order, apps/status-api, apps/status-web, apps/shop-web, apps/home-web, identity/identity]
+    disableValidationOnInstall: true # SecurityPolicy, Backend, BackendTLSPolicy
+    values: [values/sso-apps.yaml]
+
+  # --- Observability (namespace "observability") -------------------------------------------------
+  # Default-deny NetworkPolicies plus the allow-list of every flow of the stack (Phase 5), before any
+  # workload of the namespace, so that no component ever runs without them.
+  - name: observability-baseline
+    namespace: observability
+    chart: ./charts/namespace-baseline
+    labels: { tier: observability }
+    values: [values/observability-baseline.yaml]
+
+  # Prometheus Operator CRDs as templates of their own chart instead of kube-prometheus-stack's crds/
+  # directory: Helm then upgrades them with the chart, and server-side apply avoids the 256 KiB
+  # last-applied annotation limit that the large CRDs (Prometheus, Alertmanager) exceed.
+  - name: prometheus-operator-crds
+    namespace: observability
+    chart: prometheus-community/prometheus-operator-crds
+    version: 32.0.2 # Prometheus Operator v0.94.2, the same as kube-prometheus-stack 92.17.0
+    labels: { tier: observability }
+    serverSide: "true"
+    needs: [observability/observability-baseline]
+
+  - name: kube-prometheus-stack
+    namespace: observability
+    chart: prometheus-community/kube-prometheus-stack
+    version: 92.17.0
+    labels: { tier: observability }
+    needs: [observability/prometheus-operator-crds]
+    disableValidationOnInstall: true # Prometheus, Alertmanager, ServiceMonitor CRs
+    values: [values/kube-prometheus-stack.yaml]
+
+  - name: loki
+    namespace: observability
+    chart: grafana-community/loki
+    version: 20.2.1 # Loki 3.7.9
+    labels: { tier: observability }
+    needs: [observability/prometheus-operator-crds]
+    disableValidationOnInstall: true # ServiceMonitor
+    values: [values/loki.yaml]
+
+  - name: tempo
+    namespace: observability
+    chart: grafana-community/tempo
+    version: 3.2.1 # Tempo 3.1.1
+    labels: { tier: observability }
+    needs: [observability/prometheus-operator-crds]
+    disableValidationOnInstall: true # ServiceMonitor
+    values: [values/tempo.yaml]
+
+  - name: otel-collector
+    namespace: observability
+    chart: open-telemetry/opentelemetry-collector
+    version: 0.178.1
+    labels: { tier: observability }
+    needs: [observability/prometheus-operator-crds]
+    disableValidationOnInstall: true # PodMonitor
+    values: [values/otel-collector.yaml]
+
+  - name: blackbox-exporter
+    namespace: observability
+    chart: prometheus-community/prometheus-blackbox-exporter
+    version: 11.20.2 # blackbox_exporter v0.29.1
+    labels: { tier: observability }
+    needs: [observability/prometheus-operator-crds]
+    disableValidationOnInstall: true # ServiceMonitor
+    values: [values/blackbox-exporter.yaml]
+
+  # Alert and recording rules, the Alertmanager configuration Secret and Mailpit (Phase 5). After
+  # kube-prometheus-stack, whose Operator admission webhook validates PrometheusRules.
+  - name: alerting
+    namespace: observability
+    chart: ./charts/alerting
+    labels: { tier: observability }
+    needs: [observability/kube-prometheus-stack]
+    disableValidationOnInstall: true # PrometheusRule, ServiceMonitor
+
+  # Routes for the UIs, Probe resources and the Envoy PodMonitor.
+  - name: observability-config
+    namespace: observability
+    chart: ./charts/observability-config
+    labels: { tier: observability }
+    needs:
+      - envoy-gateway-system/edge
+      - observability/kube-prometheus-stack
+      - observability/blackbox-exporter
+    disableValidationOnInstall: true
+
+  # Group authorization for Prometheus, Alertmanager and Mailpit (Phase 6, ops realm, group sre) in
+  # the engineers' session of sso-edge; Grafana keeps its own login.
+  - name: sso-observability
+    namespace: observability
+    chart: ./charts/sso
+    labels: { tier: observability }
+    needs: [observability/observability-config, identity/identity]
+    disableValidationOnInstall: true # SecurityPolicy, Backend, BackendTLSPolicy
+    values: [values/sso-observability.yaml]
+
+  # Engineers' login session on the HTTPS listener (Phase 6b) and the post-logout redirect. Last of
+  # the edge policies: every route that must stay public (Keycloak, Grafana, home, the status page
+  # shell) has its own policy by then, so the listener-level login never applies to them.
+  - name: sso-edge
+    namespace: envoy-gateway-system
+    chart: ./charts/sso
+    labels: { tier: edge }
+    needs: [identity/identity, apps/sso-apps, observability/sso-observability]
+    disableValidationOnInstall: true # SecurityPolicy, EnvoyPatchPolicy
+    values: [values/sso-edge.yaml]
+
+  # --- Identity (namespace "identity", Phase 6) ---------------------------------------------------
+  # The Keycloak Operator and its CRDs are applied before helmfile from the official manifests
+  # (deploy/scripts/keycloak-operator.sh, deploy/keycloak-operator); the Keycloak Operator has no
+  # official Helm chart.
+  - name: identity-baseline
+    namespace: identity
+    chart: ./charts/namespace-baseline
+    labels: { tier: identity }
+    values: [values/identity-baseline.yaml]
+
+  - name: identity
+    namespace: identity
+    chart: ./charts/identity
+    labels: { tier: identity }
+    # The operator creates a ServiceMonitor for Keycloak (Prometheus Operator CRDs).
+    needs:
+      - identity/identity-baseline
+      - envoy-gateway-system/edge
+      - observability/prometheus-operator-crds
+    disableValidationOnInstall: true # Keycloak, KeycloakRealmImport, HTTPRoute
+
+  # --- Load generator (namespace "loadgen") -----------------------------------------------------
+  # Steady background traffic through the edge; `make load-stop` / `make load-start` scale it.
+  - name: loadgen
+    namespace: loadgen
+    chart: ../loadgen
+    labels: { tier: loadgen }
+    needs: [apps/order]

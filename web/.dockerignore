@@ -1,0 +1,8 @@
+**/node_modules
+**/dist
+**/.turbo
+**/*.tsbuildinfo
+.git
+apps/keycloak-theme/public/keycloakify-dev-resources
+**/dist_keycloak
+e2e

@@ -1,0 +1,15 @@
+# Single sign-on for the monitoring UIs in "observability" (release sso-observability). The login
+# session is the listener-level one (values/sso-edge.yaml); these policies merge into it and add the
+# authorization.
+merge:
+  # Prometheus, Alertmanager and the on-call inbox: SRE only (groups claim of the ops realm).
+  - name: ops-ui
+    routes: [prometheus, alertmanager, mailpit]
+    realm: ops
+    audiences: [ops-gateway]
+    allowGroups: [sre]
+
+public:
+  - name: grafana-own-login
+    routes: [grafana]
+    reason: Grafana logs in with Keycloak itself (OAuth, group -> role mapping, values/kube-prometheus-stack.yaml).

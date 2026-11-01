@@ -1,0 +1,120 @@
+# Realm "ops": engineers. Single sign-on for Grafana (native OAuth) and, through Envoy Gateway's OIDC
+# filter, Prometheus, Alertmanager, Mailpit and the status page. Authorization by group.
+realm: ops
+displayName: Service Health Ops
+enabled: true
+sslRequired: external
+registrationAllowed: false
+loginWithEmailAllowed: true
+resetPasswordAllowed: false
+bruteForceProtected: true
+failureFactor: 10
+accessTokenLifespan: 300
+ssoSessionIdleTimeout: 3600
+ssoSessionMaxLifespan: 36000
+groups:
+  - name: sre
+  - name: dev
+  - name: viewer
+clients:
+  # Envoy Gateway OIDC for the monitoring UIs. The groups claim drives the gateway's authorization
+  # (Prometheus, Alertmanager, Mailpit: sre only).
+  - clientId: ops-gateway
+    name: Monitoring UIs (gateway session)
+    enabled: true
+    publicClient: false
+    clientAuthenticatorType: client-secret
+    secret: "${OPS_GATEWAY_SECRET}"
+    # No realm or client roles in its tokens: authorization uses the groups claim only.
+    fullScopeAllowed: false
+    standardFlowEnabled: true
+    directAccessGrantsEnabled: false
+    implicitFlowEnabled: false
+    redirectUris:
+      - https://prometheus.localtest.me/oauth2/callback
+      - https://alertmanager.localtest.me/oauth2/callback
+      - https://mail.localtest.me/oauth2/callback
+      - https://status.localtest.me/oauth2/callback
+    webOrigins: []
+    attributes:
+      # Every logout of the engineers' gateway session ends on the landing page.
+      post.logout.redirect.uris: "https://home.localtest.me/*"
+    protocolMappers:
+      - name: groups
+        protocol: openid-connect
+        protocolMapper: oidc-group-membership-mapper
+        config:
+          claim.name: groups
+          full.path: "false"
+          access.token.claim: "true"
+          id.token.claim: "true"
+          userinfo.token.claim: "true"
+      - name: audience-ops-gateway
+        protocol: openid-connect
+        protocolMapper: oidc-audience-mapper
+        config:
+          included.client.audience: ops-gateway
+          access.token.claim: "true"
+          id.token.claim: "false"
+  # Grafana's own OAuth login; role_attribute_path maps the groups to Grafana roles.
+  - clientId: grafana
+    name: Grafana
+    enabled: true
+    publicClient: false
+    clientAuthenticatorType: client-secret
+    secret: "${GRAFANA_SECRET}"
+    fullScopeAllowed: false
+    standardFlowEnabled: true
+    directAccessGrantsEnabled: false
+    implicitFlowEnabled: false
+    rootUrl: https://grafana.localtest.me
+    redirectUris: ["https://grafana.localtest.me/login/generic_oauth"]
+    webOrigins: ["https://grafana.localtest.me"]
+    attributes:
+      # Grafana's sign-out (signout_redirect_url) ends the Keycloak session and lands on the home page.
+      post.logout.redirect.uris: "https://home.localtest.me/*##https://grafana.localtest.me/login"
+      pkce.code.challenge.method: S256
+    protocolMappers:
+      - name: groups
+        protocol: openid-connect
+        protocolMapper: oidc-group-membership-mapper
+        config:
+          claim.name: groups
+          full.path: "false"
+          access.token.claim: "true"
+          id.token.claim: "true"
+          userinfo.token.claim: "true"
+users:
+  - username: sre
+    enabled: true
+    email: sre@shd.localtest.me
+    emailVerified: true
+    firstName: Sam
+    lastName: Reliability
+    credentials:
+      - type: password
+        value: "${SRE_PASSWORD}"
+        temporary: false
+    groups: [/sre]
+  - username: dev
+    enabled: true
+    email: dev@shd.localtest.me
+    emailVerified: true
+    firstName: Dana
+    lastName: Developer
+    credentials:
+      - type: password
+        value: "${DEV_PASSWORD}"
+        temporary: false
+    groups: [/dev]
+  - username: viewer
+    enabled: true
+    email: viewer@shd.localtest.me
+    emailVerified: true
+    firstName: Vic
+    lastName: Viewer
+    credentials:
+      - type: password
+        value: "${VIEWER_PASSWORD}"
+        temporary: false
+    groups: [/viewer]

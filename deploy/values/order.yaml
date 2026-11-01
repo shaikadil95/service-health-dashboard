@@ -1,0 +1,43 @@
+# Order service: public POST /orders and GET /orders/{id} through the gateway. Calls user and payment.
+image:
+  repository: localhost/shd/order-service
+
+env:
+  USER_SERVICE_URL: http://user
+  PAYMENT_SERVICE_URL: http://payment
+
+# Customer tokens (audience shop-api) from api.localtest.me and the shop; orders:read/orders:write.
+# Calls to user and payment use order's own client credentials token.
+auth:
+  enabled: true
+  audiences: [shop-api]
+  clientCredentials:
+    secretName: order-service-client
+
+networkPolicy:
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: envoy
+          app.kubernetes.io/component: proxy
+          gateway.envoyproxy.io/owning-gateway-name: edge
+  egress:
+    # NetworkPolicy matches the pod port after Service translation (Service port 80 -> 8080).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: user
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: payment
+      ports:
+        - port: 8080
+          protocol: TCP
+
+httpRoute:
+  enabled: true
+  hostnames: [api.localtest.me]
+  pathPrefixes: [/orders]

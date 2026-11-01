@@ -1,0 +1,20 @@
+{{- with .Values.alertmanagerConfig }}
+{{- if .enabled }}
+# The Prometheus Operator mounts every key of this Secret at /etc/alertmanager/config/ and its
+# config-reloader reloads Alertmanager when it changes. The same files are checked with amtool
+# (`make rules-test`).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .secretName }}
+  labels:
+    app.kubernetes.io/part-of: service-health-dashboard
+    app.kubernetes.io/managed-by: {{ $.Release.Service }}
+type: Opaque
+stringData:
+  {{- range $path, $_ := $.Files.Glob "alertmanager/*" }}
+  {{ base $path }}: |-
+{{ $.Files.Get $path | indent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

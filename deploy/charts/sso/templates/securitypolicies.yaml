@@ -1,0 +1,143 @@
+{{- /* OIDC login handled by Envoy (authorization code flow). The spec is shared by the listener-level
+session (gatewayOidc) and the route-level ones (oidc). */ -}}
+{{- define "sso.oidcSpec" -}}
+{{- $ctx := dict "root" .root "realm" .p.realm -}}
+oidc:
+  provider:
+    backendRefs:
+      {{- include "sso.backendRefs" $ctx | nindent 6 }}
+    backendSettings:
+      {{- include "sso.backendSettings" $ctx | nindent 6 }}
+    issuer: {{ include "sso.issuer" $ctx }}
+    # Explicit endpoints: the controller does not need to fetch the discovery document.
+    authorizationEndpoint: {{ include "sso.issuer" $ctx }}/protocol/openid-connect/auth
+    tokenEndpoint: {{ include "sso.issuer" $ctx }}/protocol/openid-connect/token
+    # RP-initiated logout: the logout path ends the Keycloak session too (id_token_hint, client_id,
+    # post_logout_redirect_uri; the URI is set by the EnvoyPatchPolicy below).
+    endSessionEndpoint: {{ include "sso.issuer" $ctx }}/protocol/openid-connect/logout
+  clientID: {{ .p.clientId }}
+  clientSecret:
+    name: {{ .p.clientSecret }}
+  scopes: [openid, profile, email]
+  # One policy serves several hosts: the callback is on the host the login started from.
+  redirectURL: "https://%REQ(:authority)%/oauth2/callback"
+  logoutPath: /oauth2/logout
+  forwardAccessToken: {{ .p.forwardAccessToken | default false }}
+  {{- with .p.cookieDomain }}
+  cookieDomain: {{ . }}
+  {{- end }}
+  {{- with .p.cookieNames }}
+  cookieNames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .p.denyRedirectHeaders }}
+  denyRedirect:
+    headers:
+      {{- toYaml . | nindent 6 }}
+  {{- end }}
+{{- end }}
+
+{{- /* Validation of the forwarded access token by the JWT filter, and authorization on the groups claim. */ -}}
+{{- define "sso.jwtSpec" -}}
+{{- $ctx := dict "root" .root "realm" .p.realm "audiences" .p.audiences -}}
+# The access token that the OIDC filter forwards (Authorization header) is validated again by the
+# JWT filter, which makes its claims available for authorization.
+jwt:
+  providers:
+    {{- include "sso.jwtProvider" $ctx | nindent 4 }}
+{{- if .p.allowGroups }}
+authorization:
+  defaultAction: Deny
+  rules:
+    - name: allow-groups
+      action: Allow
+      principal:
+        jwt:
+          provider: keycloak-{{ .p.realm }}
+          claims:
+            - name: groups
+              valueType: StringArray
+              values:
+                {{- toYaml .p.allowGroups | nindent 16 }}
+{{- end }}
+{{- end }}
+
+{{- with .Values.gatewayOidc }}
+---
+# Listener-level login (parent policy): every route on the listener without a policy of its own
+# requires this session. Routes that merge into it (mergeType below) share its cookies, because Envoy
+# Gateway names the cookies after the policy that owns the OIDC configuration: one login, one
+# logout for all of them, across namespaces.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ .name }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .gateway.name }}
+      sectionName: {{ .gateway.sectionName }}
+  {{- include "sso.oidcSpec" (dict "root" $ "p" .) | nindent 2 }}
+{{- end }}
+
+{{- range .Values.oidc }}
+---
+# Route-level login with its own session (own cookies), replacing the listener-level policy.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ .name }}
+spec:
+  targetRefs:
+    {{- include "sso.targetRefs" .routes | trim | nindent 4 }}
+  {{- include "sso.oidcSpec" (dict "root" $ "p" .) | nindent 2 }}
+  {{- if .jwt }}
+  {{- include "sso.jwtSpec" (dict "root" $ "p" (dict "realm" .realm "audiences" .jwt.audiences "allowGroups" .jwt.allowGroups)) | nindent 2 }}
+  {{- end }}
+{{- end }}
+
+{{- range .Values.merge }}
+---
+# Merged into the listener-level session (StrategicMerge): this route adds token validation and
+# authorization; the login, the cookies and the logout are the listener policy's.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ .name }}
+spec:
+  mergeType: StrategicMerge
+  targetRefs:
+    {{- include "sso.targetRefs" .routes | trim | nindent 4 }}
+  {{- include "sso.jwtSpec" (dict "root" $ "p" .) | nindent 2 }}
+{{- end }}
+
+{{- range .Values.public }}
+---
+# Public: a route-level policy without any authentication replaces the listener-level login for
+# these routes (the most specific policy wins). {{ .reason }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ .name }}
+spec:
+  targetRefs:
+    {{- include "sso.targetRefs" .routes | trim | nindent 4 }}
+{{- end }}
+
+{{- range .Values.jwt }}
+{{- $ctx := dict "root" $ "realm" .realm "audiences" .audiences }}
+---
+# Bearer-token APIs: requests without a valid token (signature, iss, aud, exp) get 401 at the edge
+# and never reach the services, which validate the token again themselves.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ .name }}
+spec:
+  targetRefs:
+    {{- include "sso.targetRefs" .routes | trim | nindent 4 }}
+  jwt:
+    providers:
+      {{- include "sso.jwtProvider" $ctx | nindent 6 }}
+{{- end }}

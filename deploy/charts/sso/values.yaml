@@ -1,0 +1,37 @@
+# Keycloak as seen from Envoy: its public URL (issuer, TLS name), reached through the gateway itself.
+# Envoy connects to the gateway's Service directly (EDS endpoints) instead of resolving
+# sso.localtest.me by DNS; TLS is verified with the mkcert CA by the BackendTLSPolicy in charts/edge.
+idp:
+  host: sso.localtest.me
+  gatewayService:
+    name: envoy-edge
+    namespace: envoy-gateway-system
+    port: 443
+
+# OIDC login (authorization code flow) handled by Envoy: the browser holds only Envoy's encrypted,
+# HMAC-signed session cookies. Common fields of gatewayOidc and oidc entries:
+#   name, realm, clientId, clientSecret (Secret with key client-secret in the policy's namespace),
+#   cookieDomain (optional, for SSO across subdomains), cookieNames (optional), forwardAccessToken,
+#   denyRedirectHeaders (requests that get 401 instead of a login redirect).
+
+# Listener-level login (release sso-edge): gateway {name, sectionName} plus the fields above. Every
+# route on that listener without a route-level policy requires it.
+gatewayOidc: null
+
+# Route-level login with its own session: routes (HTTPRoute names in this namespace) plus the fields
+# above, and jwt (optional: audiences, allowGroups) to validate the forwarded access token.
+oidc: []
+
+# Route-level policies merged into the listener-level login: name, routes, realm, audiences,
+# allowGroups (optional; without it every valid token is accepted).
+merge: []
+
+# Public routes (no authentication): name, routes, reason.
+public: []
+
+# JWT validation only (APIs called with a bearer token). Each entry: name, routes, realm, audiences.
+jwt: []
+
+# post_logout_redirect_uri for every OIDC logout on a listener: uri, gateway {name, sectionName}.
+# The EnvoyPatchPolicy must live in the Gateway's namespace (release sso-edge).
+postLogoutRedirect: null

@@ -1,0 +1,91 @@
+# Alertmanager configuration (https://prometheus.io/docs/alerting/latest/configuration/).
+# Mounted from the Secret alertmanager-shd (templates/alertmanager-config.yaml) through
+# alertmanager.alertmanagerSpec.configSecret in deploy/values/kube-prometheus-stack.yaml.
+# `make lint` runs `amtool check-config` on this file and the template next to it.
+global:
+  resolve_timeout: 5m
+  # Mailpit, the local SMTP sink (templates/mailpit.yaml). In production: a real relay with TLS and
+  # credentials from a Secret (smtp_auth_password_file), or a paging tool instead of email.
+  smtp_smarthost: mailpit.observability.svc:1025
+  smtp_from: "Alertmanager (service-health-dashboard) <alertmanager@shd.localtest.me>"
+  smtp_hello: alertmanager.observability.svc
+  smtp_require_tls: false
+
+templates:
+  - /etc/alertmanager/config/*.tmpl
+
+route:
+  # One notification per incident: the same alert on the same service is one group. Alerts without
+  # a service label (kube-prometheus-stack defaults) group by alertname only.
+  group_by: [alertname, service]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  # Anything that matches no route below (e.g. a default rule with an unexpected severity) still
+  # reaches a human.
+  receiver: team-email
+  routes:
+    # Dead man's switch: delivered continuously to the heartbeat receiver, never to people.
+    - matchers: ['alertname = "Watchdog"']
+      receiver: heartbeat
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1m
+    # Pages: the on-call engineer, quickly, and again every 4 hours while it fires.
+    - matchers: ['severity = "critical"']
+      receiver: oncall-email
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+    # Causes and early warnings: the team mailbox, batched, at most once a day per alert.
+    - matchers: ['severity = "warning"']
+      receiver: team-email
+      group_wait: 1m
+      group_interval: 10m
+      repeat_interval: 24h
+    # info / none (e.g. InfoInhibitor-style plumbing): visible in the UI, never sent.
+    - matchers: ['severity =~ "info|none"']
+      receiver: "null"
+
+inhibit_rules:
+  # The cause pages once: while a service is down, its error-rate, latency and SLO alerts are muted.
+  - source_matchers: ['alertname = "ServiceDown"']
+    target_matchers: ['alertname =~ "HighErrorRate|HighLatencyP95|ErrorBudgetBurn"']
+    equal: [service]
+  # Payment above 1 s pages (critical); the 500 ms warning for the same service is then redundant.
+  - source_matchers: ['alertname = "HighLatencyP95"', 'severity = "critical"']
+    target_matchers: ['alertname = "HighLatencyP95"', 'severity = "warning"']
+    equal: [service]
+  # The project's faster pod alerts replace kube-prometheus-stack's generic ones for the same pod.
+  - source_matchers: ['alertname = "PodNotReady"']
+    target_matchers: ['alertname = "KubePodNotReady"']
+    equal: [namespace, pod]
+  - source_matchers: ['alertname = "PodCrashLooping"']
+    target_matchers: ['alertname = "KubePodCrashLooping"']
+    equal: [namespace, pod]
+  # Identity (Phase 6): when Keycloak is down, failed logins and slow tokens are its symptoms.
+  - source_matchers: ['alertname = "KeycloakDown"']
+    target_matchers: ['alertname =~ "LoginFailureSpike|TokenLatencyHigh"']
+    equal: [service]
+
+receivers:
+  - name: "null"
+  # Locally a no-op, like "null"; in production a webhook to an external heartbeat service
+  # (e.g. healthchecks.io or a PagerDuty heartbeat) that alerts when the pings stop.
+  - name: heartbeat
+  - name: oncall-email
+    email_configs:
+      - to: oncall@shd.localtest.me
+        send_resolved: true
+        headers:
+          Subject: '{{ template "shd.email.subject" . }}'
+        html: '{{ template "shd.email.html" . }}'
+        text: '{{ template "shd.email.text" . }}'
+  - name: team-email
+    email_configs:
+      - to: team@shd.localtest.me
+        send_resolved: true
+        headers:
+          Subject: '{{ template "shd.email.subject" . }}'
+        html: '{{ template "shd.email.html" . }}'
+        text: '{{ template "shd.email.text" . }}'

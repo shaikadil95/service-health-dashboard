@@ -1,0 +1,8 @@
+dns:
+  namespace: kube-system
+  podSelector:
+    k8s-app: kube-dns
+
+# Additional allow-list policies of the namespace (name: NetworkPolicy spec), for namespaces whose
+# workloads come from third-party charts that do not render their own policies (observability).
+policies: {}

@@ -1,0 +1,37 @@
+%% Phase 6: single sign-on at the gateway (ops realm) and the shop's gateway-managed session (customers realm)
+sequenceDiagram
+  autonumber
+  actor Ops as Engineer
+  actor Cust as Customer
+  participant GW as Envoy Gateway
+  participant KC as Keycloak (sso.localtest.me)
+  participant Prom as Prometheus UI
+  participant Order as Order svc
+  participant Pay as Payment svc
+
+  rect rgb(235, 245, 255)
+    Note over Ops,Prom: ops realm, OIDC + JWT SecurityPolicy, session cookie on .localtest.me
+    Ops->>GW: GET https://prometheus.localtest.me
+    GW-->>Ops: 302 to Keycloak (no session)
+    Ops->>KC: log in once (also used by Grafana's own OAuth)
+    KC-->>Ops: 302 to /oauth2/callback with code
+    Ops->>GW: callback
+    GW->>KC: code + PKCE verifier -> tokens (via the gateway, mkcert CA)
+    GW-->>Ops: encrypted session cookies, 302 to the page
+    Ops->>GW: GET with session cookie
+    GW->>GW: JWT filter on the access token, allow group sre
+    GW->>Prom: forward (viewer gets 403)
+  end
+
+  rect rgb(240, 255, 240)
+    Note over Cust,Pay: customers realm, the shop as backend for frontend
+    Cust->>GW: https://shop.localtest.me (same OIDC flow, own session)
+    Cust->>GW: fetch POST /api/orders (cookie only, no token in JS)
+    GW->>Order: POST /orders + Bearer customer token (aud shop-api)
+    Order->>Order: validate JWT (JWKS), orders:write, user = token sub
+    Order->>KC: client credentials (cached token, aud user-service + payment-service)
+    Order->>Pay: POST /payments + Bearer order token, X-End-User-Sub
+    Pay-->>Order: 201
+    Order-->>Cust: 201 Created
+    Note over GW,Order: api.localtest.me without a valid token: 401 at the gateway, never a 5xx
+  end

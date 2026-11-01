@@ -1,0 +1,178 @@
+# Defaults for one service. Per-service overrides live in deploy/values/<service>.yaml.
+
+# Name of the workload, Service and OTel service.name. Defaults to the release name.
+nameOverride: ""
+
+image:
+  repository: localhost/shd/user-service
+  tag: dev
+  # The images are loaded into the kind node (`make images`), never pulled from a registry.
+  pullPolicy: IfNotPresent
+
+# The image is a Python service built on shd_telemetry (services/). It reads PORT, LOG_LEVEL,
+# SHUTDOWN_*, FAULT_* and the OTEL_* variables, which the chart then sets. false for other images,
+# for example the static status page (nginx), which only gets `env`.
+shdRuntime: true
+
+replicaCount: 1
+revisionHistoryLimit: 3
+
+containerPort: 8080
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Extra environment variables (name: value), e.g. upstream URLs.
+env: {}
+
+logLevel: INFO
+
+# Fault injection defaults (see services/README.md). /admin/faults can change them at runtime.
+faults:
+  errorRate: "0"
+  latencyMs: "0"
+  ready: "true"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# /livez only proves the event loop responds and never checks dependencies, so a dependency outage
+# cannot cause restarts. /readyz fails while starting, draining or when forced by fault injection,
+# which removes the pod from the Service endpoints without restarting it.
+probes:
+  startup:
+    path: /livez
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 30 # up to 60 s to boot; liveness only starts after this succeeds
+  liveness:
+    path: /livez
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 2
+    successThreshold: 1
+
+# Graceful shutdown. Order of events on pod deletion:
+#   1. preStop sleep: endpoint removal propagates to kube-proxy and Envoy while the pod still serves.
+#   2. SIGTERM: the service fails /readyz and keeps serving for drainSeconds, then stops accepting
+#      connections and waits up to timeoutSeconds for in-flight requests (shd_telemetry.server).
+# terminationGracePeriodSeconds must exceed preStop + drain + timeout.
+shutdown:
+  preStopSleepSeconds: 5
+  drainSeconds: 3
+  timeoutSeconds: 10
+  terminationGracePeriodSeconds: 25
+
+otel:
+  # deployment.environment.name resource attribute.
+  environment: kind
+  # Traces and metrics go over OTLP/gRPC to the OTel Collector agent on the same node: the
+  # Collector's DaemonSet Service has internalTrafficPolicy: Local (deploy/README.md). Logs are not
+  # exported over OTLP; the Collector tails stdout instead. With enabled: false the SDK exporters
+  # are switched off (OTEL_*_EXPORTER=none), e.g. for a cluster without the observability stack.
+  exporter:
+    enabled: true
+    endpoint: http://otel-collector.observability.svc.cluster.local:4317
+    protocol: grpc
+  metricExportIntervalMs: 15000
+
+# Phase 6: OAuth 2.0 bearer tokens from Keycloak (shd_telemetry.auth). The services reach Keycloak
+# at its public URL through the gateway (same issuer as the browser), trusting the mkcert CA from the
+# ConfigMap that deploy/scripts/mkcert-ca.sh creates.
+auth:
+  enabled: false
+  issuer: https://sso.localtest.me/realms/customers
+  # Accepted `aud` values (any of them).
+  audiences: []
+  caConfigMap: localtest-ca
+  # Client credentials for calls to other services: Secret with client-id and client-secret.
+  clientCredentials:
+    secretName: ""
+  # Egress to the Envoy proxies (the gateway's HTTPS listener runs on container port 10443).
+  gatewayEgress:
+    namespace: envoy-gateway-system
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/component: proxy
+        gateway.envoyproxy.io/owning-gateway-name: edge
+    port: 10443
+
+# emptyDir mounted at /tmp, for images that need a writable /tmp with a read-only root
+# filesystem (nginx keeps its pid file and temp files there). The Python images write nothing.
+tmpVolume:
+  enabled: false
+  sizeLimit: 16Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop: [ALL]
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Ingress and egress rules for this service's pods. The namespace-baseline chart provides the
+# default-deny policy and DNS egress; these rules only add what this service needs.
+networkPolicy:
+  enabled: true
+  # NetworkPolicyPeers allowed to reach containerPort.
+  ingressFrom: []
+  # NetworkPolicyEgressRules (to + ports).
+  egress: []
+  # OTLP egress to the OTel Collector pods (keep in sync with otel.exporter). NetworkPolicy sees
+  # the pod IP after the Service translation, so the pod selector matches the agent pods.
+  otelCollector:
+    enabled: true
+    namespace: observability
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: opentelemetry-collector
+        app.kubernetes.io/instance: otel-collector
+    ports: [4317, 4318]
+  # Ingress from the blackbox exporter, which probes /readyz through the Service (synthetic check).
+  blackboxExporter:
+    enabled: true
+    namespace: observability
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: prometheus-blackbox-exporter
+
+# Gateway API HTTPRoute that exposes selected path prefixes through the shared edge Gateway.
+httpRoute:
+  enabled: false
+  parentRefs:
+    - name: edge
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames: []
+  pathPrefixes: []
+  # Extra rules to other Services in the namespace with a path rewrite, e.g. a web app's same-origin
+  # API: [{pathPrefix: /api/orders, service: order, replacePrefix: /orders}].
+  extraRules: []
+  # Redirects answered by the gateway itself: [{pathPrefix: /login, path: /}]. Policies of the route
+  # (e.g. an OIDC login) run first, so a protected redirect is a "log in, then go to path" link.
+  redirects: []

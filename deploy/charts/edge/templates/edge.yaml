@@ -1,0 +1,121 @@
+# Envoy Gateway resources: https://gateway.envoyproxy.io/docs/tasks/operations/customize-envoyproxy/
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: {{ .Values.name }}
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        replicas: {{ .Values.envoyProxy.replicas }}
+        container:
+          resources:
+            {{- toYaml .Values.envoyProxy.resources | nindent 12 }}
+      envoyService:
+        name: {{ .Values.envoyProxy.serviceName }}
+        type: NodePort
+        # Envoy Gateway has no nodePort field; a strategic-merge patch (merge key: port) pins them.
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              ports:
+                {{- range $port, $nodePort := .Values.envoyProxy.nodePorts }}
+                - port: {{ $port | int }}
+                  nodePort: {{ $nodePort }}
+                {{- end }}
+  {{- with .Values.envoyProxy.telemetry }}
+  # The gateway is an observed component: Prometheus metrics on the "metrics" port (19001,
+  # /stats/prometheus, scraped by a PodMonitor) and OpenTelemetry spans for every request.
+  # Envoy's OpenTelemetry tracer propagates W3C trace context (traceparent), so a request through
+  # the gateway and the services ends up as one trace.
+  # https://gateway.envoyproxy.io/docs/tasks/observability/proxy-trace/
+  telemetry:
+    metrics:
+      prometheus:
+        disable: false
+    {{- if .tracing.enabled }}
+    tracing:
+      samplingRate: {{ .tracing.samplingRate }}
+      provider:
+        type: OpenTelemetry
+        serviceName: {{ .tracing.serviceName }}
+        backendRefs:
+          {{- toYaml .tracing.backendRefs | nindent 10 }}
+      customTags:
+        k8s.pod.name:
+          type: Environment
+          environment:
+            name: ENVOY_POD_NAME
+            defaultValue: "-"
+        k8s.namespace.name:
+          type: Environment
+          environment:
+            name: ENVOY_POD_NAMESPACE
+            defaultValue: {{ $.Release.Namespace }}
+    {{- end }}
+  {{- end }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ .Values.name }}
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: {{ .Values.name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Values.name }}
+spec:
+  gatewayClassName: {{ .Values.name }}
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: {{ .Values.gateway.listeners.http.port }}
+      hostname: "*.localtest.me"
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: {{ .Values.gateway.listeners.https.port }}
+      hostname: "*.localtest.me"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ .Values.tls.certificate.secretName }}
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  {{- toYaml .Values.gateway.routeNamespaces | nindent 18 }}
+---
+# Envoy Gateway marks endpoints that are not ready as DRAINING. With Envoy's default panic threshold
+# (50 %), a backend whose endpoints are all not ready would still get traffic ("panic mode": fail
+# open). Disabling panic mode makes the gateway honour readiness like kube-proxy does: a service
+# with no ready pods answers 503 at the edge. No retries or extra timeouts are configured here on
+# purpose: POST /orders is not idempotent, and the services own their upstream timeouts.
+# https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/panic_threshold
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ .Values.name }}-backends
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Values.name }}
+  healthCheck:
+    panicThreshold: {{ .Values.backends.panicThreshold }}

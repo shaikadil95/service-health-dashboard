@@ -1,0 +1,225 @@
+{{- $name := include "microservice.name" . -}}
+{{- $sd := .Values.shutdown -}}
+{{- if le (int $sd.terminationGracePeriodSeconds) (add $sd.preStopSleepSeconds $sd.drainSeconds $sd.timeoutSeconds | int) -}}
+{{- fail "shutdown.terminationGracePeriodSeconds must be greater than preStopSleepSeconds + drainSeconds + timeoutSeconds" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "microservice.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "microservice.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $name }}
+      # The services never call the Kubernetes API.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ $sd.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ $name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          {{- if or .Values.shdRuntime .Values.env }}
+          env:
+            {{- if .Values.shdRuntime }}
+            - name: PORT
+              value: {{ .Values.containerPort | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+            - name: SHUTDOWN_DRAIN_SECONDS
+              value: {{ $sd.drainSeconds | quote }}
+            - name: SHUTDOWN_TIMEOUT_SECONDS
+              value: {{ $sd.timeoutSeconds | quote }}
+            - name: FAULT_ERROR_RATE
+              value: {{ .Values.faults.errorRate | quote }}
+            - name: FAULT_LATENCY_MS
+              value: {{ .Values.faults.latencyMs | quote }}
+            - name: FAULT_READY
+              value: {{ .Values.faults.ready | quote }}
+            # OpenTelemetry: standard SDK variables.
+            # https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: K8S_NAMESPACE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: K8S_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: OTEL_SERVICE_NAME
+              value: {{ $name | quote }}
+            # service.instance.id follows the OTel Kubernetes guidance (namespace.pod.container):
+            # https://opentelemetry.io/docs/specs/semconv/non-normative/k8s-attributes/
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: {{ list
+                (printf "deployment.environment.name=%s" .Values.otel.environment)
+                (printf "service.instance.id=$(K8S_NAMESPACE_NAME).$(K8S_POD_NAME).%s" $name)
+                "k8s.namespace.name=$(K8S_NAMESPACE_NAME)"
+                "k8s.pod.name=$(K8S_POD_NAME)"
+                "k8s.pod.uid=$(K8S_POD_UID)"
+                "k8s.node.name=$(K8S_NODE_NAME)"
+                (printf "k8s.deployment.name=%s" $name)
+                (printf "k8s.container.name=%s" $name)
+                | join "," | quote }}
+            - name: OTEL_SEMCONV_STABILITY_OPT_IN
+              value: http
+            {{- if .Values.otel.exporter.enabled }}
+            {{- if not .Values.otel.exporter.endpoint }}
+            {{- fail "otel.exporter.endpoint is required when otel.exporter.enabled is true" }}
+            {{- end }}
+            - name: OTEL_TRACES_EXPORTER
+              value: otlp
+            - name: OTEL_METRICS_EXPORTER
+              value: otlp
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.otel.exporter.endpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ .Values.otel.exporter.protocol | quote }}
+            - name: OTEL_METRIC_EXPORT_INTERVAL
+              value: {{ .Values.otel.metricExportIntervalMs | quote }}
+            {{- else }}
+            - name: OTEL_TRACES_EXPORTER
+              value: none
+            - name: OTEL_METRICS_EXPORTER
+              value: none
+            {{- end }}
+            # Logs go to stdout as JSON and the Collector tails them (file_log receiver); exporting them
+            # over OTLP as well would store every line twice.
+            - name: OTEL_LOGS_EXPORTER
+              value: none
+            {{- end }}
+            {{- with .Values.auth }}
+            {{- if .enabled }}
+            # Bearer-token validation (shd_telemetry.auth): JWKS, iss, aud, exp; roles per endpoint.
+            - name: AUTH_ENABLED
+              value: "true"
+            - name: AUTH_ISSUER
+              value: {{ .issuer | quote }}
+            - name: AUTH_AUDIENCES
+              value: {{ join "," .audiences | quote }}
+            - name: AUTH_CA_FILE
+              value: /etc/ssl/localtest/ca.crt
+            {{- with .clientCredentials }}
+            {{- if .secretName }}
+            # Outbound calls to other services: client credentials grant.
+            - name: OAUTH_TOKEN_URL
+              value: {{ printf "%s/protocol/openid-connect/token" $.Values.auth.issuer | quote }}
+            - name: OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef: { name: {{ .secretName }}, key: client-id }
+            - name: OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ .secretName }}, key: client-secret }
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- range $k, $v := .Values.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+            successThreshold: {{ .Values.probes.readiness.successThreshold }}
+          lifecycle:
+            preStop:
+              # Native sleep action (GA in Kubernetes 1.34): no shell needed in the image.
+              sleep:
+                seconds: {{ $sd.preStopSleepSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if or .Values.tmpVolume.enabled .Values.auth.enabled }}
+          volumeMounts:
+            {{- if .Values.tmpVolume.enabled }}
+            - name: tmp
+              mountPath: /tmp
+            {{- end }}
+            {{- if .Values.auth.enabled }}
+            - name: localtest-ca
+              mountPath: /etc/ssl/localtest
+              readOnly: true
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.tmpVolume.enabled .Values.auth.enabled }}
+      volumes:
+        {{- if .Values.tmpVolume.enabled }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmpVolume.sizeLimit }}
+        {{- end }}
+        {{- if .Values.auth.enabled }}
+        - name: localtest-ca
+          configMap:
+            name: {{ .Values.auth.caConfigMap }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

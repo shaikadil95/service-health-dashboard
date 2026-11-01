@@ -1,0 +1,56 @@
+# Public URL of Keycloak. Browsers and in-cluster clients use the same URL (CoreDNS rewrite), so
+# the issuer in every token is https://sso.localtest.me/realms/<realm>.
+hostname: sso.localtest.me
+
+gateway:
+  name: edge
+  namespace: envoy-gateway-system
+  sectionName: https
+
+# Secrets created once per cluster by deploy/scripts/identity-secrets.sh (never committed).
+secrets:
+  database: keycloak-db       # username, password
+  admin: keycloak-admin       # username, password: bootstrap admin of the master realm
+  realm: realm-secrets        # client secrets and demo user passwords (realm import placeholders)
+
+keycloak:
+  # Custom image (deploy/keycloak/Dockerfile, `make images`): quay.io/keycloak/keycloak:26.8.1 plus the
+  # customers realm's login theme, built with `kc.sh build`. The operator starts a custom image with
+  # --optimized, so its build-time options must match the CR (see the Dockerfile).
+  image: localhost/shd/keycloak:dev
+  instances: 1
+  # Defaults of the operator are 1700Mi requests / 2Gi limits; sized for a laptop. The JVM heap is
+  # a percentage of the limit (Keycloak's container defaults).
+  resources:
+    requests:
+      cpu: 200m
+      memory: 640Mi
+    limits:
+      memory: 1Gi
+  # Traces to the node-local OTel Collector (OTLP/gRPC), like the services.
+  tracing:
+    enabled: true
+    endpoint: http://otel-collector.observability.svc.cluster.local:4317
+    samplerRatio: 1
+
+# The import Job runs its own Keycloak (measured peak working set ~570 MiB); without explicit values it
+# requests the operator's default of 1700 Mi.
+realmImport:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+
+postgres:
+  image:
+    repository: docker.io/library/postgres
+    tag: 18.6-alpine
+  storage: 2Gi
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 256Mi

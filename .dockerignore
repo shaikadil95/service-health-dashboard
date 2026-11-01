@@ -1,0 +1,8 @@
+# Allow-list: the build context only needs the workspace manifests and package sources.
+*
+!pyproject.toml
+!uv.lock
+!services/*/pyproject.toml
+!services/*/src/
+**/__pycache__/
+**/*.py[cod]

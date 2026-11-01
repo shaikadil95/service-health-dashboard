@@ -1,0 +1,70 @@
+# promtool unit tests for rules/kubernetes.rules.yaml. Run with `make rules-test`.
+rule_files:
+  - ../rules/kubernetes.rules.yaml
+evaluation_interval: 30s
+
+tests:
+  - name: PodNotReady after 2 minutes, with the service label from the pod labels
+    interval: 30s
+    input_series:
+      - series: 'kube_pod_status_ready{namespace="apps", pod="user-7d9f-abcde", condition="false"}'
+        values: '0 0 1x12'
+      - series: 'kube_pod_status_ready{namespace="apps", pod="order-5c6b-fghij", condition="false"}'
+        values: '0x14'
+      # Not ready for 30 s during a rollout: too short to alert.
+      - series: 'kube_pod_status_ready{namespace="apps", pod="payment-6d9c-klmno", condition="false"}'
+        values: '0 0 1 0x11'
+      - series: 'kube_pod_labels{namespace="apps", pod="user-7d9f-abcde", label_app_kubernetes_io_name="user"}'
+        values: '1x14'
+      - series: 'kube_pod_labels{namespace="apps", pod="order-5c6b-fghij", label_app_kubernetes_io_name="order"}'
+        values: '1x14'
+      - series: 'kube_pod_labels{namespace="apps", pod="payment-6d9c-klmno", label_app_kubernetes_io_name="payment"}'
+        values: '1x14'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PodNotReady
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: PodNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              pod: user-7d9f-abcde
+              service: user
+            exp_annotations:
+              summary: "Pod user-7d9f-abcde of user is not ready"
+              description: "apps/user-7d9f-abcde has failed its readiness probe for more than 2 minutes. It receives no traffic but is not restarted (readiness never restarts a pod)."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/PodNotReady.md
+              dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=user
+
+  - name: PodCrashLooping after 5 minutes in CrashLoopBackOff
+    interval: 30s
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{namespace="apps", pod="payment-6d9c-klmno", container="payment", reason="CrashLoopBackOff"}'
+        values: '1x20'
+      # Waiting while the image is created: not a crash loop.
+      - series: 'kube_pod_container_status_waiting_reason{namespace="apps", pod="order-5c6b-fghij", container="order", reason="ContainerCreating"}'
+        values: '1x20'
+      - series: 'kube_pod_labels{namespace="apps", pod="payment-6d9c-klmno", label_app_kubernetes_io_name="payment"}'
+        values: '1x20'
+      - series: 'kube_pod_labels{namespace="apps", pod="order-5c6b-fghij", label_app_kubernetes_io_name="order"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: PodCrashLooping
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: PodCrashLooping
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: apps
+              pod: payment-6d9c-klmno
+              container: payment
+              service: payment
+            exp_annotations:
+              summary: "Container payment of payment is crash looping"
+              description: "apps/payment-6d9c-klmno (payment) has been in CrashLoopBackOff during the last 5 minutes, for more than 5 minutes."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/PodCrashLooping.md
+              dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=payment

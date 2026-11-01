@@ -1,0 +1,156 @@
+# Realm "customers": shop customers and the business APIs (RealmRepresentation as YAML).
+# ${...} are placeholders that the realm import fills from the realm-secrets Secret.
+realm: customers
+displayName: Service Health Shop
+enabled: true
+# Branded login, registration, password reset and error pages (Keycloakify, web/apps/keycloak-theme),
+# shipped in the custom Keycloak image. The ops realm keeps Keycloak's default theme.
+loginTheme: shd-shop
+sslRequired: external
+registrationAllowed: true
+loginWithEmailAllowed: true
+duplicateEmailsAllowed: false
+resetPasswordAllowed: true
+# Password-reset emails go to Mailpit (https://mail.localtest.me), the demo's only mail server.
+smtpServer:
+  host: mailpit.observability.svc
+  port: "1025"
+  from: shop@shd.localtest.me
+  fromDisplayName: Service Health Shop
+verifyEmail: false
+rememberMe: false
+bruteForceProtected: true
+failureFactor: 10
+accessTokenLifespan: 300
+ssoSessionIdleTimeout: 1800
+ssoSessionMaxLifespan: 36000
+# Every customer (also self-registered ones) may read and place orders.
+roles:
+  realm:
+    - name: "orders:read"
+      description: Read your orders
+    - name: "orders:write"
+      description: Place orders
+    - name: default-roles-customers
+      description: Roles of every customer
+      composite: true
+      composites:
+        realm: [offline_access, uma_authorization, "orders:read", "orders:write"]
+        client:
+          account: [view-profile, manage-account]
+    - name: offline_access
+    - name: uma_authorization
+  client:
+    # Resource servers. Their client roles are permissions for calls between services; holding one
+    # also puts the client into the token's audience (Keycloak's "audience resolve" mapper).
+    user-service:
+      - name: "users:read"
+        description: Look up customer profiles
+    payment-service:
+      - name: "payments:write"
+        description: Charge payments
+defaultRole:
+  name: default-roles-customers
+clients:
+  # The business API as an audience. No login flow of its own.
+  - clientId: shop-api
+    name: Shop API (audience)
+    enabled: true
+    publicClient: false
+    standardFlowEnabled: false
+    directAccessGrantsEnabled: false
+    serviceAccountsEnabled: false
+    bearerOnly: true
+  - clientId: user-service
+    name: User service (audience)
+    enabled: true
+    bearerOnly: true
+    standardFlowEnabled: false
+    directAccessGrantsEnabled: false
+  - clientId: payment-service
+    name: Payment service (audience)
+    enabled: true
+    bearerOnly: true
+    standardFlowEnabled: false
+    directAccessGrantsEnabled: false
+  # Envoy Gateway's OIDC filter on shop.localtest.me (backend for frontend: the browser only holds
+  # an encrypted session cookie, the gateway forwards the access token to the API).
+  - clientId: shop-gateway
+    name: Shop (gateway session)
+    enabled: true
+    publicClient: false
+    clientAuthenticatorType: client-secret
+    secret: "${SHOP_GATEWAY_SECRET}"
+    standardFlowEnabled: true
+    directAccessGrantsEnabled: false
+    implicitFlowEnabled: false
+    serviceAccountsEnabled: false
+    redirectUris: ["https://shop.localtest.me/oauth2/callback"]
+    webOrigins: []
+    attributes:
+      # After the gateway's logout path, Keycloak sends the customer to the landing page.
+      post.logout.redirect.uris: "https://home.localtest.me/*##https://shop.localtest.me/*"
+    protocolMappers:
+      - name: audience-shop-api
+        protocol: openid-connect
+        protocolMapper: oidc-audience-mapper
+        config:
+          included.client.audience: shop-api
+          access.token.claim: "true"
+          id.token.claim: "false"
+  # Order -> User and Order -> Payment: client credentials. Its service account holds only the client
+  # roles users:read and payments:write, so its tokens are valid for those two services (aud) and
+  # for nothing else, not even the public API.
+  - clientId: order-service
+    name: Order service (service account)
+    enabled: true
+    publicClient: false
+    clientAuthenticatorType: client-secret
+    secret: "${ORDER_SERVICE_SECRET}"
+    standardFlowEnabled: false
+    directAccessGrantsEnabled: false
+    serviceAccountsEnabled: true
+  # k6 load generator: client credentials with the customer roles, audience shop-api. A dedicated
+  # test client instead of the password grant, which stays disabled everywhere.
+  - clientId: loadgen
+    name: Load generator (service account)
+    enabled: true
+    publicClient: false
+    clientAuthenticatorType: client-secret
+    secret: "${LOADGEN_SECRET}"
+    standardFlowEnabled: false
+    directAccessGrantsEnabled: false
+    serviceAccountsEnabled: true
+    protocolMappers:
+      - name: audience-shop-api
+        protocol: openid-connect
+        protocolMapper: oidc-audience-mapper
+        config:
+          included.client.audience: shop-api
+          access.token.claim: "true"
+          id.token.claim: "false"
+users:
+  - username: customer
+    enabled: true
+    email: customer@shd.localtest.me
+    emailVerified: true
+    firstName: Ada
+    lastName: Customer
+    credentials:
+      - type: password
+        value: "${CUSTOMER_PASSWORD}"
+        temporary: false
+    realmRoles: [default-roles-customers]
+  - username: service-account-order-service
+    enabled: true
+    serviceAccountClientId: order-service
+    clientRoles:
+      user-service: ["users:read"]
+      payment-service: ["payments:write"]
+  - username: service-account-loadgen
+    enabled: true
+    serviceAccountClientId: loadgen
+    realmRoles: ["orders:read", "orders:write"]
+    # Reads the profiles of the seeded customers u-1001..u-1003.
+    clientRoles:
+      user-service: ["users:read"]

@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app.kubernetes.io/name: loadgen
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/part-of: service-health-dashboard
+spec:
+  replicas: {{ .Values.replicas }}
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: loadgen
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: loadgen
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/part-of: service-health-dashboard
+      annotations:
+        # Roll the pod when the script changes.
+        checksum/script: {{ .Files.Get "scripts/orders.js" | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 12345
+        runAsGroup: 12345
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: k6
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # No progress bar, no end-of-test summary, no anonymous usage report to Grafana Labs.
+          args: [run, --quiet, --summary-mode=disabled, --no-usage-report, /scripts/orders.js]
+          env:
+            - name: BASE_URL
+              value: {{ .Values.baseUrl | quote }}
+            - name: RATE
+              value: {{ .Values.rate | quote }}
+            - name: DURATION
+              value: {{ .Values.duration | quote }}
+            - name: TOKEN_URL
+              value: {{ .Values.tokenUrl | quote }}
+            - name: CLIENT_ID
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.clientSecret }}, key: client-id }
+            - name: CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.clientSecret }}, key: client-secret }
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/localtest/ca.crt
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: localtest-ca
+              mountPath: /etc/ssl/localtest
+              readOnly: true
+      volumes:
+        - name: localtest-ca
+          configMap:
+            name: {{ .Values.caConfigMap }}
+        - name: script
+          configMap:
+            name: {{ .Release.Name }}-script
+        - name: tmp
+          emptyDir: {}

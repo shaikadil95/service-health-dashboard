@@ -1,0 +1,73 @@
+# Status API (services/status-api): /api on status.localtest.me, same origin as the status page.
+# Reads Prometheus and Alertmanager in "observability"; no other service calls it.
+image:
+  repository: localhost/shd/status-api
+
+env:
+  PROMETHEUS_URL: http://kps-prometheus.observability.svc:9090
+  ALERTMANAGER_URL: http://kps-alertmanager.observability.svc:9093
+  STATUS_SERVICES: user,order,payment
+  STATUS_NAMESPACE: apps
+  GRAFANA_URL: https://grafana.localtest.me
+  CACHE_TTL_SECONDS: "10"
+  QUERY_TIMEOUT_SECONDS: "3"
+  # Same thresholds as the alert rules (docs/architecture.md, section 7).
+  ERROR_RATIO_THRESHOLD: "0.05"
+  LATENCY_P95_THRESHOLD_MS: "500"
+
+# GET /api/v1/me validates the access token that the gateway forwards (ops realm, audience
+# ops-gateway) to show who is signed in. The other endpoints are authenticated by the gateway.
+auth:
+  enabled: true
+  issuer: https://sso.localtest.me/realms/ops
+  audiences: [ops-gateway]
+
+networkPolicy:
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: envoy
+          app.kubernetes.io/component: proxy
+          gateway.envoyproxy.io/owning-gateway-name: edge
+  egress:
+    # Pod ports after the Service translation (both Services also map 9090/9093 to themselves).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              operator.prometheus.io/name: kps-prometheus
+      ports:
+        - port: 9090
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: alertmanager
+              alertmanager: kps-alertmanager
+      ports:
+        - port: 9093
+          protocol: TCP
+  # Not one of the monitored services: no synthetic probe.
+  blackboxExporter:
+    enabled: false
+
+httpRoute:
+  enabled: true
+  hostnames: [status.localtest.me]
+  # /api/v1/... only; /admin, /docs and the probes stay inside the cluster. The route also carries the
+  # paths of the engineers' login (SecurityPolicy status-api, values/sso-apps.yaml): /oauth2/callback
+  # and /oauth2/logout (answered by Envoy's OIDC filter) and /login, the status page's Login button:
+  # log in, then back to the page.
+  pathPrefixes: [/api, /oauth2]
+  redirects:
+    - pathPrefix: /login
+      path: /

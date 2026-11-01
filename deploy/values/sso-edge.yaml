@@ -1,0 +1,32 @@
+# Engineers' single sign-on at the edge (release sso-edge in envoy-gateway-system): one login session
+# on the HTTPS listener, shared by every route that merges into it. Route policies in "apps" and
+# "observability" add token validation and group authorization (values/sso-apps.yaml,
+# values/sso-observability.yaml); public routes opt out explicitly. A new route on the listener is
+# therefore protected by default.
+gatewayOidc:
+  name: ops-session
+  gateway:
+    name: edge
+    sectionName: https
+  realm: ops
+  clientId: ops-gateway
+  clientSecret: ops-gateway-oidc
+  # Cookies for .localtest.me with fixed names: one login covers the status page, Prometheus,
+  # Alertmanager and Mailpit; one logout ends it on all of them.
+  cookieDomain: localtest.me
+  cookieNames:
+    accessToken: ops-access-token
+    idToken: ops-id-token
+  forwardAccessToken: true
+  # The status page's fetch() calls get 401 instead of a cross-origin redirect to Keycloak: the page
+  # then shows its Login button.
+  denyRedirectHeaders:
+    - name: X-Requested-With
+      value: fetch
+
+# Every gateway logout (engineers and shop) ends on the public landing page.
+postLogoutRedirect:
+  uri: https://home.localtest.me/
+  gateway:
+    name: edge
+    sectionName: https

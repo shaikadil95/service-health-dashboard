@@ -1,0 +1,78 @@
+# NetworkPolicies of the namespace "identity" (release identity-baseline, chart namespace-baseline):
+# default deny for ingress and egress, DNS, and the flows of Keycloak and PostgreSQL. Ingress to
+# Keycloak itself (HTTP 8080 from the Envoy proxies only, management 9000 from Prometheus only) is
+# the NetworkPolicy that the Keycloak Operator renders from the Keycloak CR (charts/identity).
+
+policies:
+  # The operator reconciles Keycloak, its StatefulSet, Services, NetworkPolicy and ServiceMonitor.
+  allow-operator-apiserver-egress:
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: keycloak-operator
+    policyTypes: [Egress]
+    egress:
+      - ports:
+          - { port: 6443, protocol: TCP }
+          - { port: 443, protocol: TCP }
+
+  # Keycloak and the realm import Jobs (a Keycloak pod running `kc.sh import`) use the database.
+  allow-postgres:
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: postgres
+    policyTypes: [Ingress]
+    ingress:
+      - from:
+          - podSelector: {}
+        ports:
+          - { port: 5432, protocol: TCP }
+
+  allow-postgres-egress:
+    podSelector: {}
+    policyTypes: [Egress]
+    egress:
+      - to:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: postgres
+        ports:
+          - { port: 5432, protocol: TCP }
+
+  # Keycloak and the realm import Jobs (also a Keycloak) -> OTel Collector agent (traces, OTLP/gRPC).
+  allow-otlp-egress:
+    podSelector: {}
+    policyTypes: [Egress]
+    egress:
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: observability
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: opentelemetry-collector
+        ports:
+          - { port: 4317, protocol: TCP }
+
+  # Keycloak to its own pods (Infinispan/JGroups cluster port 7800; the operator's policy denies that
+  # port to everything else), and SMTP to Mailpit (password-reset emails of the customers realm).
+  allow-keycloak-egress:
+    podSelector:
+      matchLabels:
+        app: keycloak
+    policyTypes: [Egress]
+    egress:
+      - to:
+          - podSelector:
+              matchLabels:
+                app: keycloak
+        ports:
+          - { port: 7800, protocol: TCP }
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: observability
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: mailpit
+        ports:
+          - { port: 1025, protocol: TCP }

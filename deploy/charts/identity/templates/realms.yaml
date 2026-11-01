@@ -1,0 +1,27 @@
+{{- range $path, $_ := .Files.Glob "realms/*.yaml" }}
+{{- $realm := base $path | trimSuffix ".yaml" }}
+# Realm as code. KeycloakRealmImport only CREATES a realm: if it exists, the import is skipped and
+# changes here are not applied (https://www.keycloak.org/operator/realm-import). To apply a change,
+# delete the realm (admin console or `kcadm.sh delete realms/<realm>`) and the import, then
+# `make deploy` again; on a disposable cluster, `make down && make up`. Secrets come from the
+# realm-secrets Secret through placeholders, never from this file.
+apiVersion: k8s.keycloak.org/v2beta1
+kind: KeycloakRealmImport
+metadata:
+  name: realm-{{ $realm }}
+spec:
+  keycloakCRName: keycloak
+  # Sizing of the import Job (values.yaml, realmImport).
+  resources:
+    {{- toYaml $.Values.realmImport.resources | nindent 4 }}
+  placeholders:
+    {{- range $key := list "OPS_GATEWAY_SECRET" "GRAFANA_SECRET" "SHOP_GATEWAY_SECRET" "ORDER_SERVICE_SECRET" "LOADGEN_SECRET" "CUSTOMER_PASSWORD" "SRE_PASSWORD" "DEV_PASSWORD" "VIEWER_PASSWORD" }}
+    {{ $key }}:
+      secret:
+        name: {{ $.Values.secrets.realm }}
+        key: {{ $key }}
+    {{- end }}
+  realm:
+{{ $.Files.Get $path | indent 4 }}
+---
+{{- end }}

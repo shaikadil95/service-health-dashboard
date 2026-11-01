@@ -1,0 +1,123 @@
+# Grafana Loki, community Helm chart (grafana-community/loki). Grafana's docs point to this chart since
+# the Loki chart moved to the grafana-community repository (the grafana/loki chart now targets GEL):
+# https://grafana.com/docs/loki/latest/setup/install/helm/install-monolithic/
+# Values reference: https://github.com/grafana-community/helm-charts/blob/main/charts/loki/values.yaml
+#
+# Monolithic (single binary), filesystem storage on a 2 Gi PVC, 24 h retention, OTLP ingestion only.
+# The memcached caches, gateway, canary, Helm test pod and ruler are switched off to stay lean.
+fullnameOverride: loki
+deploymentMode: Monolithic
+
+loki:
+  # Single tenant; no X-Scope-OrgID header needed.
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2026-10-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  limits_config:
+    # Required for OTLP: attributes that are not index labels are stored as structured metadata.
+    allow_structured_metadata: true
+    volume_enabled: true
+    retention_period: 24h
+    otlp_config:
+      resource_attributes:
+        # Replace Loki's default index-label list (which includes high-cardinality k8s.pod.name and
+        # service.instance.id) with a few stable attributes. Everything else, including trace_id,
+        # pod name and log attributes, stays queryable as structured metadata.
+        # https://grafana.com/docs/loki/latest/send-data/otel/
+        ignore_defaults: true
+        attributes_config:
+          - action: index_label
+            attributes:
+              - service.name
+              - service.namespace
+              - k8s.namespace.name
+              - k8s.container.name
+              - deployment.environment.name
+  # Retention is applied by the compactor; deletes go to the filesystem delete-request store.
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+    working_directory: /var/loki/compactor
+  analytics:
+    reporting_enabled: false
+  pattern_ingester:
+    enabled: false
+  ui:
+    enabled: false
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    size: 2Gi
+    enableStatefulSetAutoDeletePVC: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+
+# The other deployment modes stay at zero replicas.
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+ingester:
+  replicas: 0
+querier:
+  replicas: 0
+queryFrontend:
+  replicas: 0
+queryScheduler:
+  replicas: 0
+distributor:
+  replicas: 0
+compactor:
+  replicas: 0
+indexGateway:
+  replicas: 0
+bloomPlanner:
+  replicas: 0
+bloomBuilder:
+  replicas: 0
+bloomGateway:
+  replicas: 0
+
+# Extras that a laptop setup does not need.
+gateway:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+memcachedExporter:
+  enabled: false
+lokiCanary:
+  enabled: false
+test:
+  enabled: false
+ruler:
+  enabled: false
+sidecar:
+  rules:
+    enabled: false
+
+# Loki's own metrics, scraped by Prometheus.
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: 30s

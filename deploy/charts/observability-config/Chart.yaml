@@ -1,0 +1,9 @@
+apiVersion: v2
+name: observability-config
+description: >-
+  Glue between the observability stack and the platform: HTTPRoutes for Grafana, Prometheus and
+  Alertmanager on the edge Gateway, blackbox Probe resources for the services and the PodMonitor
+  that scrapes the Envoy proxies.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

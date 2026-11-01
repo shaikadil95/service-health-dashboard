@@ -1,0 +1,33 @@
+# https://sso.localtest.me -> Keycloak. Login pages, OIDC endpoints and the admin console (admin login
+# with the bootstrap admin of `make sso-users`); metrics and health stay on the management port.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: keycloak
+spec:
+  parentRefs:
+    - name: {{ .Values.gateway.name }}
+      namespace: {{ .Values.gateway.namespace }}
+      sectionName: {{ .Values.gateway.sectionName }}
+  hostnames:
+    - {{ .Values.hostname | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: keycloak-service
+          port: 8080
+---
+# Public: the listener-level engineers' login (values/sso-edge.yaml) must never apply to Keycloak
+# itself. A route-level policy without authentication replaces it for this route.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: keycloak-public
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: keycloak

@@ -1,0 +1,43 @@
+# Keycloak Operator 26.8.1, official manifest, installed into the namespace "identity" (it watches
+# only its own namespace). Rendered with kubectl's built-in kustomize by deploy/scripts/keycloak-operator.sh.
+# Changes to the upstream manifest, all as patches:
+#   - namespace identity: also rewrites the ServiceAccount subject of the ClusterRoleBinding, which
+#     upstream hard-codes to "keycloak";
+#   - Pod Security "restricted" securityContext (the namespace enforces it), read-only root
+#     filesystem with an emptyDir on /tmp;
+#   - imagePullPolicy IfNotPresent: the image is preloaded into kind (`make platform-images`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: identity
+resources:
+  - https://raw.githubusercontent.com/keycloak/keycloak-k8s-resources/26.8.1/kubernetes/kubernetes.yml
+patches:
+  - target:
+      kind: Deployment
+      name: keycloak-operator
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: keycloak-operator
+      spec:
+        template:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+              seccompProfile:
+                type: RuntimeDefault
+            containers:
+              - name: keycloak-operator
+                imagePullPolicy: IfNotPresent
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop: [ALL]
+                volumeMounts:
+                  - name: tmp
+                    mountPath: /tmp
+            volumes:
+              - name: tmp
+                emptyDir: {}

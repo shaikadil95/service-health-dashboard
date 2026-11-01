@@ -1,0 +1,39 @@
+# Edge authentication for the routes in "apps" (release sso-apps).
+merge:
+  # Status page data (/api) plus its /login and /oauth2 paths: every engineer of the ops realm (sre,
+  # dev, viewer), in the shared listener-level session (values/sso-edge.yaml).
+  - name: status-api
+    routes: [status-api]
+    realm: ops
+    audiences: [ops-gateway]
+
+public:
+  - name: status-page-shell
+    routes: [status-web]
+    reason: The status page's static files; it shows a Login button until /api answers.
+  - name: home
+    routes: [home-web]
+    reason: The landing page, also where every logout ends.
+
+oidc:
+  # Customer shop: backend for frontend with its own session (customers realm). Envoy runs the login
+  # and keeps the session; the shop's same-origin /api calls are forwarded to the services with the
+  # customer's access token.
+  - name: shop
+    routes: [shop-web]
+    realm: customers
+    clientId: shop-gateway
+    clientSecret: shop-gateway-oidc
+    forwardAccessToken: true
+    jwt:
+      audiences: [shop-api]
+    denyRedirectHeaders:
+      - name: X-Requested-With
+        value: fetch
+
+jwt:
+  # api.localtest.me: bearer tokens of the customers realm for the shop API.
+  - name: api
+    routes: [order, user]
+    realm: customers
+    audiences: [shop-api]
