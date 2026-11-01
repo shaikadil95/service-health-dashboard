@@ -57,6 +57,14 @@ tls:
     duration: 2160h # 90 days
     renewBefore: 720h # 30 days
 
+# Envoy's own calls to Keycloak (OIDC code exchange, JWKS) go to the gateway's HTTPS listener
+# (sso.localtest.me) through the envoy-edge Service. The SecurityPolicies of these namespaces may
+# reference it; TLS is verified with the mkcert CA (ConfigMap from deploy/scripts/mkcert-ca.sh).
+idpBackend:
+  hostname: sso.localtest.me
+  caConfigMap: localtest-ca
+  policyNamespaces: [apps, observability]
+
 # http://<host> -> 301 https://<host> for the browser-facing hosts. The API host is deliberately not
 # redirected: a client that sends a token over plain HTTP has already leaked it, so it gets a 404.
 redirect:

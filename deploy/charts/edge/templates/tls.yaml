@@ -48,3 +48,43 @@ spec:
           requestRedirect:
             scheme: https
             statusCode: 301
+{{- with .Values.idpBackend }}
+---
+# SecurityPolicies in other namespaces may use the gateway's Service as the address of the OIDC
+# provider and the JWKS endpoint (https://sso.localtest.me is served by this Gateway).
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: securitypolicies-to-gateway
+spec:
+  from:
+    {{- range .policyNamespaces }}
+    - group: gateway.envoyproxy.io
+      kind: SecurityPolicy
+      namespace: {{ . }}
+    {{- end }}
+  to:
+    - group: ""
+      kind: Service
+      name: {{ $.Values.envoyProxy.serviceName }}
+---
+# TLS from Envoy to its own HTTPS listener: SNI and certificate name sso.localtest.me, trusted with
+# the mkcert CA instead of Envoy's system bundle.
+# https://gateway.envoyproxy.io/docs/tasks/security/oidc/#connect-to-an-oidc-provider-with-self-signed-certificate
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: idp-via-gateway
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: {{ $.Values.envoyProxy.serviceName }}
+      sectionName: https-443
+  validation:
+    caCertificateRefs:
+      - group: ""
+        kind: ConfigMap
+        name: {{ .caConfigMap }}
+    hostname: {{ .hostname }}
+{{- end }}

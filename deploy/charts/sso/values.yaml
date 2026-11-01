@@ -1,8 +1,12 @@
-# Keycloak as seen from Envoy: the public URL, reached through the gateway itself (CoreDNS rewrite),
-# over TLS that is verified with the mkcert CA (ConfigMap from deploy/scripts/mkcert-ca.sh).
+# Keycloak as seen from Envoy: its public URL (issuer, TLS name), reached through the gateway itself.
+# Envoy connects to the gateway's Service directly (EDS endpoints) instead of resolving
+# sso.localtest.me by DNS; TLS is verified with the mkcert CA by the BackendTLSPolicy in charts/edge.
 idp:
   host: sso.localtest.me
-  caConfigMap: localtest-ca
+  gatewayService:
+    name: envoy-edge
+    namespace: envoy-gateway-system
+    port: 443
 
 # OIDC login (authorization code flow) handled by Envoy: the browser holds only Envoy's encrypted,
 # HMAC-signed session cookies. Each entry:

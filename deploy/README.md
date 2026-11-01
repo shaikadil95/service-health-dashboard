@@ -523,10 +523,12 @@ realm in the admin console (or `kubectl -n identity exec keycloak-0 -- /opt/keyc
 
 The OIDC policies use `redirectURL: https://%REQ(:authority)%/oauth2/callback` (one policy, several hosts), `logoutPath:
 /oauth2/logout`, and `denyRedirect` for requests with `X-Requested-With: fetch` (the web apps' API calls get 401 instead of a login
-page). Envoy reaches Keycloak for the code exchange and the JWKS through a `Backend` (`sso.localtest.me:443`, the gateway itself)
-with a `BackendTLSPolicy` that trusts the mkcert CA, as in the
-[Envoy Gateway OIDC task](https://gateway.envoyproxy.io/docs/tasks/security/oidc/#connect-to-an-oidc-provider-with-self-signed-certificate),
-with retries on transient failures. Envoy renews expired access tokens with the refresh token (a redirect to the same URL with new
+page). Envoy reaches Keycloak for the code exchange and the JWKS at its public URL, served by the gateway itself: the policies'
+`backendRefs` point to the gateway's own Service `envoy-edge` (port 443, EDS endpoints; a `ReferenceGrant` in the edge chart allows
+it), and a `BackendTLSPolicy` on that Service sets the TLS name `sso.localtest.me` and trusts the mkcert CA, following the
+[Envoy Gateway OIDC task](https://gateway.envoyproxy.io/docs/tasks/security/oidc/#connect-to-an-oidc-provider-with-self-signed-certificate);
+calls are retried on transient failures. (A DNS-resolved `Backend` for `sso.localtest.me` was tried first: its endpoints briefly
+disappeared when cluster DNS answers were empty, which failed logins with "no healthy upstream".) Envoy renews expired access tokens with the refresh token (a redirect to the same URL with new
 cookies). Grafana is not behind a policy: it uses its own Keycloak OAuth (`ops` realm, client `grafana`, PKCE,
 `role_attribute_path` on `groups`, strict) and keeps the local admin as break-glass access.
 

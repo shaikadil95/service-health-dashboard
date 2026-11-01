@@ -2,11 +2,14 @@
 https://{{ .root.Values.idp.host }}/realms/{{ .realm }}
 {{- end }}
 
+{{/* Keycloak at its public URL = the gateway's own HTTPS listener: the envoy-edge Service (EDS, no DNS).
+The edge chart grants the reference (ReferenceGrant) and adds the BackendTLSPolicy with the mkcert CA. */}}
 {{- define "sso.backendRefs" -}}
-- group: gateway.envoyproxy.io
-  kind: Backend
-  name: keycloak
-  port: 443
+- group: ""
+  kind: Service
+  name: {{ .root.Values.idp.gatewayService.name }}
+  namespace: {{ .root.Values.idp.gatewayService.namespace }}
+  port: {{ .root.Values.idp.gatewayService.port }}
 {{- end }}
 
 {{/* Envoy's calls to Keycloak (code exchange, refresh, JWKS) are retried on transient failures, as
