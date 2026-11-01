@@ -5,9 +5,15 @@ Scaffolded with the official CLI, `shadcn@4.23.0 init -t vite --monorepo -b radi
 
 | Path | What |
 |---|---|
-| `apps/status` | Status page (Phase 4) on http://status.localtest.me |
-| `apps/shop` | Customer shop page (Phase 6, not built yet) |
-| `packages/ui` (`@workspace/ui`) | Shared shadcn/ui components (Card, Badge, Table, Alert, Tooltip, Chart, Skeleton, Button), styles and `cn` |
+| `apps/status` | Status page on https://status.localtest.me (engineers, `ops` realm) |
+| `apps/shop` | Customer shop on https://shop.localtest.me (`customers` realm) |
+| `packages/ui` (`@workspace/ui`) | Shared shadcn/ui components (Card, Badge, Table, Alert, Tooltip, Chart, Skeleton, Button, Input, Label), styles and `cn` |
+
+Both apps leave sign-in to the gateway: Envoy Gateway's OIDC filter logs the user in with Keycloak and keeps the session in
+encrypted, HTTP-only cookies, so **no token is ever visible to JavaScript** (the backend-for-frontend pattern of
+[OAuth 2.0 for Browser-Based Apps](https://datatracker.ietf.org/doc/draft-ietf-oauth-browser-based-apps/)). Their `fetch()` calls
+send `X-Requested-With: fetch`, for which the gateway answers an expired session with 401 instead of a login redirect; the apps then
+offer to sign in again. Sign-out is the gateway's `/oauth2/logout`.
 
 ## Status page
 
@@ -22,14 +28,23 @@ Scaffolded with the official CLI, `shadcn@4.23.0 init -t vite --monorepo -b radi
   (the last answer stays visible).
 - Dark mode: follows the system, toggle in the header (or press `d`).
 
+## Shop
+
+![Shop page](../docs/screenshots/shop.png)
+
+- `GET /api/me` (→ User `GET /users/me`) shows who is signed in; the User service creates the profile from the token on first use.
+- A product list with quantities and the total, `POST /api/orders` (→ Order `POST /orders`, without `user_id`: the order belongs to the
+  token's subject), and the customer's orders from `GET /api/orders`. The gateway adds the customer's access token to both routes.
+- Results: confirmed, payment declined (402) or an error message; dark mode like the status page.
+
 ## Development
 
 Node ≥ 20.19 and pnpm 12 (`brew install pnpm`, or `npm i -g pnpm@12`).
 
 ```bash
 make web-check        # pnpm install --frozen-lockfile, Prettier check, ESLint, tsc, Vitest, vite build
-make web-dev          # dev server; /api is proxied to STATUS_API_URL (default http://status.localtest.me)
-STATUS_API_URL=http://localhost:8080 make web-dev   # against `uv run status-api`
+make web-dev          # status page dev server; /api is proxied to STATUS_API_URL (default http://localhost:8080, `uv run status-api`)
+cd web && pnpm --filter shop dev   # shop dev server; /api/orders is proxied to ORDER_API_URL (default http://localhost:8082)
 ```
 
 Add shadcn components from `web/`: `pnpm dlx shadcn@latest add <component> -c apps/status` (they land in `packages/ui`).
@@ -38,7 +53,7 @@ If the CLI fails with `unable to get local issuer certificate` (Node's bundled C
 
 ## Image
 
-[`Dockerfile`](Dockerfile) (context `web/`, `--build-arg APP=status`): pnpm install and `vite build` on `node:24-slim`, then the
+[`Dockerfile`](Dockerfile) (context `web/`, `--build-arg APP=status` or `APP=shop`): pnpm install and `vite build` on `node:24-slim`, then the
 static files on `nginxinc/nginx-unprivileged` (UID 101, port 8080, ~63 MB). [`nginx.conf`](nginx.conf): SPA fallback, immutable
 caching for hashed `/assets`, `no-cache` for `index.html`, security headers (CSP, `nosniff`, `frame-ancestors 'none'`), `/livez`
 and `/readyz`. It runs with a read-only root filesystem; only `/tmp` (emptyDir) is writable. `make images` builds and loads it.

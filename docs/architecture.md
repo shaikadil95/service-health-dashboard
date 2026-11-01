@@ -15,7 +15,7 @@
 7. [Detection and alerting strategy](#7-detection-and-alerting-strategy)
 8. [Status API contract](#8-status-api-contract)
 9. [Networking](#9-networking)
-10. [Security and identity (Phase 6)](#10-security-and-identity-phase-6)
+10. [Security and identity](#10-security-and-identity)
 11. [Evolving to production](#11-evolving-to-production)
 12. [Risks and mitigations](#12-risks-and-mitigations)
 13. [References](#13-references)
@@ -59,7 +59,8 @@ Payment) that helps R&D teams to:
 ```mermaid
 flowchart LR
   client(["Browser / k6"])
-  gw["Envoy Gateway<br/>*.localtest.me"]
+  gw["Envoy Gateway<br/>*.localtest.me (HTTPS, SSO)"]
+  kc["Keycloak<br/>identity namespace"]
 
   subgraph apps["apps namespace"]
     user["User svc"]
@@ -80,7 +81,8 @@ flowchart LR
   end
 
   client --> gw
-  gw --> order & user & pay
+  gw -- "OIDC / JWT" --> kc
+  gw --> order & user
   order --> user
   order --> pay
   gw --> graf & sapi
@@ -125,12 +127,13 @@ A k6 load generator sends steady traffic so that there is always something to ob
 | Tempo | Trace storage, TraceQL queries, and a metrics-generator for span metrics and the service graph | Single-binary mode |
 | Alertmanager | Grouping, deduplication, inhibition, silences and severity-based routing | Part of kube-prometheus-stack |
 | Mailpit | Local SMTP sink with a web UI. Stands in for the on-call notification channel. | Deployment |
-| Grafana | Dashboards as code (Service Health Overview, Service Detail, Telemetry Pipeline), Explore, Traces Drilldown, and links between signals (exemplars to traces to logs) | Part of kube-prometheus-stack |
+| Grafana | Dashboards as code (Service Health Overview, Service Detail), Explore, Traces Drilldown, and links between signals (exemplars to traces to logs). Keycloak login with group-based roles. | Part of kube-prometheus-stack |
 | Status API | FastAPI backend for frontend, itself instrumented with OTel. Queries Prometheus and Alertmanager and computes each service's status. | Deployment |
 | Web frontends | React, TypeScript, Vite, Tailwind and shadcn/ui in a pnpm monorepo under `web/`: `apps/status` (status page, Phase 4), `apps/shop` (customer page, Phase 6) and the shared `packages/ui` (`@workspace/ui`). Built as static assets. | `nginx-unprivileged` Deployment per app |
 | k6 | Steady, low background traffic for the demo | Deployment ([`loadgen/`](../loadgen)) |
-| Envoy Gateway | Gateway API implementation. Host-based routing on `*.localtest.me`, TLS, and OIDC and JWT authentication from Phase 6. | Deployment and managed Envoy proxy |
-| Keycloak (Phase 6) | Identity provider at `sso.localtest.me`. A `customers` realm for the shop and API, and an `ops` realm for operations UIs. | Official **Keycloak Operator** (`Keycloak` and `KeycloakRealmImport` CRs) with a plain PostgreSQL StatefulSet (official image, PVC) |
+| Envoy Gateway | Gateway API implementation. Host-based routing on `*.localtest.me`, TLS termination, OIDC login with a gateway-managed session, JWT validation and claim-based authorization (`SecurityPolicy`). | Deployment and managed Envoy proxy |
+| cert-manager | Issues and renews the `*.localtest.me` certificate of the Gateway from a CA issuer backed by the mkcert local CA | Deployment (official chart) |
+| Keycloak | Identity provider at `sso.localtest.me`. A `customers` realm for the shop and API, and an `ops` realm for operations UIs. Realms, clients, roles and groups as code. | Official **Keycloak Operator** (`Keycloak` and `KeycloakRealmImport` CRs) with a plain PostgreSQL StatefulSet (official image, PVC) |
 | kind on Podman or Docker | Local Kubernetes runtime | Containers on the host |
 
 ### Custom resources (CRDs)
@@ -310,8 +313,8 @@ only the expected calls: the Gateway to the services, Order to User and Payment,
 | Logs | **Loki** | OpenSearch / Elasticsearch | Indexes labels only, so it is cheap and light, and it uses the same label model as Prometheus | Full-text search scans data. Label cardinality needs discipline. |
 | Status view | Custom **Status API (BFF)** + status page in **React, Vite and shadcn/ui** | Grafana public dashboard, Uptime Kuma, Statuspage | A small, stable contract for non-experts. Hides PromQL and caches results. Accessible, consistent components that the Phase 6 shop page reuses. | An extra service plus a Node and pnpm build toolchain |
 | Notification | **Alertmanager** → email (**Mailpit** locally) | Grafana Alerting, direct webhooks | Grouping, inhibition, silences and routing. Mature, and fits the Prometheus rules model. | Email is not real paging. Swap the receiver in production. |
-| Edge | **Envoy Gateway** (Gateway API) | Traefik, ingress-nginx (retired) | Gateway API is the successor to Ingress. Built-in OIDC and JWT `SecurityPolicy` for Phase 6, with no oauth2-proxy. | More CRDs to learn. Heavier than Traefik (about 250–350 MB). |
-| Identity | **Keycloak**, realms `customers` and `ops` (Phase 6, *Proposed*) | Dex, a hosted identity provider | Open source, full OIDC support, and realms keep customer and staff identities apart | Heavy (JVM plus PostgreSQL, about 1–1.5 GB more RAM). Requires HTTPS. |
+| Edge | **Envoy Gateway** (Gateway API) | Traefik, ingress-nginx (retired) | Gateway API is the successor to Ingress. Built-in OIDC and JWT `SecurityPolicy`, so no oauth2-proxy. | More CRDs to learn. Heavier than Traefik (about 250–350 MB). |
+| Identity | **Keycloak** (official Operator), realms `customers` and `ops` | Dex, a hosted identity provider | Open source, full OIDC support, and realms keep customer and staff identities apart | Heavy (JVM plus PostgreSQL, about 1–1.5 GB more RAM). Requires HTTPS. |
 | Local runtime | **kind** on Docker (preferred) or Podman | k3d, minikube, Docker Compose | Conformant Kubernetes, also usable in CI, and the Makefile detects either container engine | The Podman provider is experimental and needs a rootful Podman machine |
 
 ## 6. Health probe design
@@ -450,7 +453,7 @@ Example response:
   "metrics": { "probe_success": true, "ready_replicas": 1, "desired_replicas": 1, "rps": 2.0, "error_ratio_5m": 0.0781, "latency_p95_ms": 4.9 },
   "series": { "rps": [{ "t": 1793485800, "v": 2.0 }], "error_ratio": [ ... ], "latency_p95_ms": [ ... ] },
   "alerts": [],
-  "links": { "dashboard": "http://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=payment" },
+  "links": { "dashboard": "https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=payment" },
   "updated_at": "2026-10-31T22:31:15Z"
 }
 ```
@@ -464,16 +467,16 @@ Envoy Gateway. The `status.localtest.me` route sends `/api` to the Status API an
 
 ## 9. Networking
 
-| Hostname | Routes to | From |
+Every host is HTTPS only (Phase 6); plain HTTP redirects the browser hosts and serves nothing else.
+
+| Hostname | Routes to | Access |
 |---|---|---|
-| `api.localtest.me` | User, Order and Payment services (path-based) | Phase 2 |
-| `grafana.localtest.me` | Grafana | Phase 3 |
-| `prometheus.localtest.me` | Prometheus UI | Phase 3 |
-| `alertmanager.localtest.me` | Alertmanager UI | Phase 3 |
-| `status.localtest.me` | Status page (`/`) and Status API (`/api`) | Phase 4 |
-| `mail.localtest.me` | Mailpit UI | Phase 5 |
-| `sso.localtest.me` | Keycloak | Phase 6 |
-| `shop.localtest.me` | Customer shop page | Phase 6 |
+| `api.localtest.me` | User and Order services (path-based) | Bearer token of the `customers` realm (audience `shop-api`), checked by the gateway and again by the service |
+| `shop.localtest.me` | Customer shop page (`/`), its API (`/api/orders` → Order, `/api/me` → User) | Customer login (`customers` realm), session held by the gateway |
+| `status.localtest.me` | Status page (`/`) and Status API (`/api`) | Engineer login (`ops` realm), any group |
+| `grafana.localtest.me` | Grafana | Grafana's own Keycloak login (`ops` realm): `sre` → Admin, `dev` → Editor, `viewer` → Viewer; local break-glass admin |
+| `prometheus.localtest.me`, `alertmanager.localtest.me`, `mail.localtest.me` | Prometheus, Alertmanager, Mailpit (on-call inbox) | Engineer login (`ops` realm), group `sre` only |
+| `sso.localtest.me` | Keycloak (login pages, OIDC endpoints, admin console) | Public |
 
 - **Envoy Gateway** implements the Kubernetes **Gateway API**. There is one `Gateway` with a listener for `*.localtest.me`
   and `HTTPRoute`s per hostname; on `api.localtest.me` each service owns a route for its public path prefix (`/orders`, `/users`),
@@ -489,15 +492,19 @@ Envoy Gateway. The `status.localtest.me` route sends `/api` to the Status API an
   CoreDNS `rewrite` rule maps `*.localtest.me` to the gateway Service, so **the same URL works from the
   browser and from inside the cluster**. Phase 6 needs this: the OIDC issuer URL (`https://sso.localtest.me/realms/...`) must
   be identical for browsers and for in-cluster token validation.
-- **TLS.** Phases 1 to 5 use plain HTTP. **Phase 6 requires HTTPS**, because Envoy Gateway OIDC requires an HTTPS redirect URL.
-  A mkcert local CA and cert-manager issue a `*.localtest.me` wildcard certificate for the Gateway's HTTPS listener.
-- **NetworkPolicy.** Every namespace denies all traffic by default. These flows are allowed: the Gateway to the apps, the apps to the Collector,
+- **TLS.** HTTPS terminates at the Gateway with a `*.localtest.me` wildcard certificate that **cert-manager** issues (and renews)
+  from a CA `ClusterIssuer` backed by the **mkcert** local CA. Envoy Gateway's OIDC filter requires HTTPS redirect URLs, and session
+  cookies are `Secure`. In-cluster clients (services, Grafana, k6, Envoy's own calls to Keycloak) trust the same CA, so every
+  component uses the public URLs. Plain HTTP only redirects browser hosts; the API is not served over HTTP at all (a token sent
+  in clear text is already leaked, so it is not redirected either). Inside the cluster, traffic behind the gateway is plain HTTP;
+  production would add mTLS (service mesh) or re-encryption.
+- **NetworkPolicy.** Every namespace (`apps`, `observability`, `identity`) denies all traffic by default. These flows are allowed: the Gateway to the apps, the apps to the Collector,
   Prometheus and the blackbox exporter to metrics and probe ports, and Order to User and Payment, plus DNS egress. In `observability`
   (Phase 5) every flow of the stack is listed explicitly: the Collector to the three stores, Grafana to its datasources,
   Alertmanager to Mailpit, the Status API to Prometheus and Alertmanager, the Gateway to the UIs, and the operators and sidecars to the API server. kindnet, the default
   CNI, has [enforced NetworkPolicy since kind v0.24][kind-v024].
 
-## 10. Security and identity (Phase 6)
+## 10. Security and identity
 
 ![Identity and SSO sequence](diagrams/identity-sso-sequence.svg)
 
@@ -507,69 +514,106 @@ Envoy Gateway. The `status.localtest.me` route sends `/api` to the Status API an
 ```mermaid
 sequenceDiagram
   autonumber
-  actor Ops as Ops engineer
-  actor Cust as Customer (shop page)
+  actor Ops as Engineer
+  actor Cust as Customer
   participant GW as Envoy Gateway
   participant KC as Keycloak (sso.localtest.me)
   participant Prom as Prometheus UI
   participant Order as Order svc
+  participant Pay as Payment svc
 
   rect rgb(235, 245, 255)
-    Note over Ops,Prom: ops realm, OIDC SecurityPolicy (HTTPS, cookieDomain localtest.me)
+    Note over Ops,Prom: ops realm, OIDC + JWT SecurityPolicy, session cookie on .localtest.me
     Ops->>GW: GET https://prometheus.localtest.me
-    GW-->>Ops: 302 to Keycloak ops realm (no session cookie)
-    Ops->>KC: login (once for all ops UIs)
-    KC-->>Ops: 302 to redirect URL with code
-    Ops->>GW: GET callback with code
-    GW->>KC: exchange code for tokens (same URL in-cluster via CoreDNS rewrite)
-    KC-->>GW: ID and access token
-    GW-->>Ops: signed session cookie, 302 to original URL
+    GW-->>Ops: 302 to Keycloak (no session)
+    Ops->>KC: log in once (also used by Grafana's own OAuth)
+    KC-->>Ops: 302 to /oauth2/callback with code
+    Ops->>GW: callback
+    GW->>KC: code + PKCE verifier -> tokens (via the gateway, mkcert CA)
+    GW-->>Ops: encrypted session cookies, 302 to the page
     Ops->>GW: GET with session cookie
-    GW->>GW: authorize on groups claim (sre, dev, viewer)
-    GW->>Prom: forward request
-    Prom-->>Ops: Prometheus UI
-    Note over Ops,KC: Grafana uses its native Keycloak OAuth with the same SSO session
+    GW->>GW: JWT filter on the access token, allow group sre
+    GW->>Prom: forward (viewer gets 403)
   end
 
   rect rgb(240, 255, 240)
-    Note over Cust,Order: customers realm, JWT SecurityPolicy on api.localtest.me
-    Cust->>KC: login (Auth Code + PKCE, token handling decided in Phase 6)
-    KC-->>Cust: session or access token (aud shop-api)
-    Cust->>GW: POST /orders with Bearer JWT
-    GW->>GW: verify signature (cached JWKS), iss, aud, exp
-    alt token valid
-      GW->>Order: forward request
-      Order->>Order: re-validate JWT and orders:write role
-      Order-->>Cust: 201 Created
-    else invalid or missing
-      GW-->>Cust: 401 Unauthorized (not counted as 5xx)
-    end
+    Note over Cust,Pay: customers realm, the shop as backend for frontend
+    Cust->>GW: https://shop.localtest.me (same OIDC flow, own session)
+    Cust->>GW: fetch POST /api/orders (cookie only, no token in JS)
+    GW->>Order: POST /orders + Bearer customer token (aud shop-api)
+    Order->>Order: validate JWT (JWKS), orders:write, user = token sub
+    Order->>KC: client credentials (cached token, aud user-service + payment-service)
+    Order->>Pay: POST /payments + Bearer order token, X-End-User-Sub
+    Pay-->>Order: 201
+    Order-->>Cust: 201 Created
+    Note over GW,Order: api.localtest.me without a valid token: 401 at the gateway, never a 5xx
   end
 ```
 
 </details>
 
-Status: **Proposed**. The design:
+**Goals:** customers sign in to a shop and place orders; engineers sign in once and reach every monitoring UI with permissions
+by role; the business APIs and the calls between services are authenticated; and identity itself is observable.
 
-- **Keycloak** is deployed with the official **Keycloak Operator**. A `Keycloak` resource defines the server, and `KeycloakRealmImport` resources keep realms, clients,
-  roles and groups as code. It uses a plain **PostgreSQL StatefulSet** (official `postgres` image, PVC) and is served at `sso.localtest.me`.
-  The Bitnami chart is not used: its maintained images moved to a paid catalog in 2025.
-  - **`customers` realm:** self-registration, a public client `customer-web` (authorization code flow with PKCE), API audience `shop-api`, and roles `orders:read` and `orders:write`.
-  - **`ops` realm:** groups `sre`, `dev` and `viewer`, with SSO across every monitoring UI.
-- **Ops UIs.** Grafana uses its **native Keycloak OAuth** and maps groups to Admin, Editor or Viewer with `role_attribute_path`. The gateway only routes it.
-  Prometheus, Alertmanager and Mailpit are protected by an **Envoy Gateway OIDC `SecurityPolicy`** (`ops` realm, HMAC-signed cookie session,
-  `cookieDomain: localtest.me` for SSO across subdomains), and access is restricted by group claims. No oauth2-proxy is needed.
-- **Status page and Status API.** OIDC login with PKCE. The Status API validates `ops` JWTs.
-- **Business APIs.** A gateway **JWT `SecurityPolicy`** (`customers` realm) is the first check. The services re-validate the JWT themselves
-  (JWKS-cached signature, `iss`, `aud`, `exp` and roles) through a shared FastAPI dependency, as defense in depth.
-  Service-to-service calls (Order to User and Payment) use the **client credentials** grant, with a token restricted to the target's audience, and pass the end-user subject in a header for audit.
-- **Customer shop page** (`web/apps/shop`, React and shadcn/ui, sharing `@workspace/ui`): log in with the `customers` realm, then list and create orders.
-  How the shop handles tokens is an **open decision** for the start of Phase 6. The recommended option is a gateway-managed session (Envoy OIDC cookie
-  plus `forwardAccessToken`), so no tokens are held in browser JavaScript. This is the backend-for-frontend pattern recommended by [OAuth 2.0 for Browser-Based Apps][oauth-bba].
-  The alternative is for the SPA to hold tokens itself (authorization code with PKCE, using `oidc-client-ts`).
-- **Never authenticated:** `/livez`, `/readyz` and metrics. They are not routed through the gateway, and NetworkPolicy limits them to the kubelet and Prometheus.
-- **Observability of identity:** Keycloak metrics and OTel tracing, panels for 401 and 403 responses, and alerts `LoginFailureSpike`, `KeycloakDown` and `TokenLatencyHigh`.
-- Before Phase 6, every UI is open but bound to loopback only. This is acceptable on a laptop and **not** in any shared environment.
+**Identity provider: Keycloak**, deployed with the official **Keycloak Operator** (`Keycloak` and `KeycloakRealmImport` resources)
+and a plain **PostgreSQL StatefulSet** (official image, 2 Gi PVC). Keycloak is open source, implements OIDC and OAuth 2.0 fully, and its
+realms keep customer and staff identities apart. Dex was rejected because it federates to other providers instead of storing users
+(no self-registration), and a hosted provider because it needs an external account and does not fit a self-contained demo. The
+Bitnami chart is not used: its maintained images moved to a paid catalog in 2025. Realms, clients, roles, groups and mappers are
+code (`KeycloakRealmImport`); secrets and demo passwords are generated per cluster and enter through placeholders. A realm import
+only creates a realm, it never updates one, so changing a realm means deleting and importing it again (acceptable on a disposable
+cluster; production would manage realms with a declarative tool such as keycloak-config-cli or Terraform).
+
+| Realm | Users | Clients |
+|---|---|---|
+| `customers` | Customers (self-registration; roles `orders:read` and `orders:write` by default), demo user `customer` | `shop-gateway` (Envoy's OIDC login for the shop), `order-service` and `loadgen` (client credentials), `shop-api`, `user-service`, `payment-service` (audiences only) |
+| `ops` | Groups `sre`, `dev`, `viewer`, one demo user each | `ops-gateway` (Envoy's OIDC login for the monitoring UIs, `groups` claim), `grafana` (Grafana's own OAuth) |
+
+**Where authentication happens.**
+
+- **At the edge, Envoy Gateway `SecurityPolicy`.** For browser UIs, Envoy's OAuth2 filter runs the authorization code flow with
+  PKCE against Keycloak and keeps the result in **encrypted, HMAC-signed, HTTP-only cookies**. Prometheus, Alertmanager and Mailpit
+  share one policy with `cookieDomain: localtest.me`, so one login covers all three; the forwarded access token is validated again
+  by the JWT filter, whose claims drive the authorization rule "group `sre` only" (other engineers get 403). The status page accepts
+  every engineer. `api.localtest.me` only validates bearer tokens (signature with cached JWKS, `iss`, `aud`, `exp`) and answers 401
+  without calling a service. Envoy reaches Keycloak at its public URL through the gateway, with a `BackendTLSPolicy` that trusts the
+  mkcert CA, so issuer, certificates and redirects are identical for browsers and the cluster.
+- **Grafana** uses its **native Keycloak OAuth** instead of the gateway, because Grafana maps the `groups` claim to its own roles
+  (`role_attribute_path`: `sre` → Admin, `dev` → Editor, `viewer` → Viewer; strict, so users in no group are refused). A local
+  break-glass admin stays for when Keycloak is down.
+- **In the services, again (defense in depth).** A shared FastAPI dependency in `shd_telemetry` validates the token itself and
+  authorizes per endpoint: `orders:write` to place an order, `orders:read` to read; a customer only ever sees and creates their own
+  orders (the order belongs to the token's subject). Probes, metrics and `/admin` need no token: they are not routed through the
+  gateway, and NetworkPolicies limit who can reach them.
+- **Between services: client credentials.** Order calls User and Payment with **its own** token (OAuth 2.0 client credentials,
+  cached until shortly before it expires), not with the customer's. Its service account holds exactly the client roles `users:read`
+  and `payments:write`, which also make `user-service` and `payment-service` the token's audiences; Payment accepts nothing else,
+  so a customer token cannot charge a payment directly. The customer's subject travels in `X-End-User-Sub` and appears in the
+  audit logs of User and Payment. Token exchange (RFC 8693) would carry the user's identity cryptographically and per-target tokens
+  would narrow the audience further; both are the production refinements.
+- **Customer shop: backend for frontend.** The shop (React and shadcn/ui, sharing `@workspace/ui`) never holds a token. Envoy runs
+  the login and keeps the session; the page calls same-origin `/api/...` routes and the gateway adds the customer's access token
+  (`forwardAccessToken`). This is the pattern that [OAuth 2.0 for Browser-Based Apps][oauth-bba] recommends as the most secure:
+  an XSS bug cannot steal a token. Expired sessions answer `fetch()` calls with 401 instead of a redirect, and the page offers to
+  sign in again. A single-page app holding tokens itself (authorization code with PKCE in JavaScript) was the rejected alternative.
+- **Load generator.** k6 uses a dedicated test client with the client credentials grant (`loadgen`); the password grant stays
+  disabled for every client.
+
+**401 and 403 are not errors of the service.** They are 4xx: they never count towards `HighErrorRate`, the SLO or the status page.
+They are visible separately: the gateway's JWT and RBAC filter counters and the services' `auth_failures_total{reason}` on the
+Overview dashboard's "Rejected requests (401/403)" panel.
+
+**Observability of identity.** Keycloak exposes metrics on its management port (scraped through the operator's `ServiceMonitor`),
+including user event metrics per realm (logins, failed logins with the error, client-credentials logins) and an HTTP latency
+histogram, and sends OpenTelemetry traces to the Collector (gateway → Keycloak → PostgreSQL appears in the service graph). Alerts:
+`KeycloakDown` (critical: nobody can sign in), `LoginFailureSpike` (more than 30 % failed logins with enough attempts) and
+`TokenLatencyHigh` (p95 of the token endpoint above 500 ms); `KeycloakDown` inhibits the other two. The Overview dashboard has a
+"Sign-ins (Keycloak)" panel.
+
+**Hardening in the cluster.** Keycloak trusts the `X-Forwarded-*` headers of the gateway (edge TLS termination), so the operator's
+NetworkPolicy lets only the Envoy proxies reach its HTTP port; otherwise any pod could spoof those headers. The management port is
+open to Prometheus only, PostgreSQL to the identity namespace only. Every pod runs with the `restricted` Pod Security Standard.
+The CA private key of mkcert is in the cluster (cert-manager signs with it): acceptable for a local cluster, never for a shared one.
 
 ## 11. Evolving to production
 
@@ -580,7 +624,7 @@ Status: **Proposed**. The design:
 | Logs and traces | Loki and Tempo in single-binary mode on local disk | Microservices or simple-scalable mode with **object storage** (S3, GCS), retention by tenant, and caching |
 | Alerting | One Alertmanager, email to Mailpit | An Alertmanager cluster (gossip), PagerDuty or Opsgenie for critical alerts, chat for warnings, an external dead man's switch, and SLO burn-rate alerts |
 | Multi-cluster | One kind cluster | Agents in each cluster add `cluster` and `env` labels. A central or regional backend with multi-tenancy (`X-Scope-OrgID`). |
-| Security | Open UIs (Phase 6 adds SSO) | mTLS or authentication on OTLP endpoints (Collector `auth` extensions), network segmentation, secrets in a vault, PII redaction in the Collector |
+| Security | SSO at the gateway, JWT in the services, client credentials between services, default-deny NetworkPolicies, mkcert CA | A public CA (ACME) at the edge, mTLS inside (service mesh), token exchange for delegation, managed or HA Keycloak with a managed database, authentication on OTLP endpoints (Collector `auth` extensions), secrets in a vault, PII redaction in the Collector |
 | Cost and cardinality | Low retention | Attribute allow-lists (`transform` and `filter` processors), limits per tenant, monitoring of active series, sampling, and log level and volume budgets |
 | Delivery | Makefile + helmfile | CI (lint, test, Trivy, multi-arch images to GHCR, a kind end-to-end smoke test) and **Argo CD** pull-based GitOps |
 

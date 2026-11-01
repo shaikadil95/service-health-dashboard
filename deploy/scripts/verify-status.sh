@@ -45,7 +45,7 @@ trap cleanup EXIT
 
 ui() { # ui <host> <curl args...>: through the gateway, with the SSO session
   shift
-  edge_curl -b "$JAR" -c "$JAR" "$@"
+  sso_curl "$JAR" "$@"
 }
 url() { edge_url "$1" "$2"; }
 STATUS=status.localtest.me

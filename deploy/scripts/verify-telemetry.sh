@@ -35,7 +35,7 @@ ko() {
 
 ui() { # ui <host> <curl args...>: through the gateway, with the SSO session of "sre"
   shift
-  edge_curl -b "$JAR" -c "$JAR" "$@"
+  sso_curl "$JAR" "$@"
 }
 url() { edge_url "$1" "$2"; }
 
