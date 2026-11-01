@@ -266,13 +266,15 @@ grafana-password: ## Print the generated Grafana break-glass admin password (use
 	@$(KUBECTL_KIND) -n observability get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
 
 # A separate Chrome profile that resolves *.localtest.me to the gateway itself (for networks whose DNS
-# drops 127.0.0.1 answers) and accepts certificates chained to the mkcert CA without installing it
-# into a trust store (no admin rights). The flags only apply to this profile.
+# drops 127.0.0.1 answers) and accepts the gateway's certificate without installing the mkcert CA into a
+# trust store (no admin rights). Chrome matches --ignore-certificate-errors-spki-list against the chain
+# the server presents, which is the leaf only, so the hash is taken from the certificate served now
+# (it changes when cert-manager renews it: run `make browser` again). The flags only apply to this profile.
 CHROME_APP ?= Google Chrome
 .PHONY: browser
-browser: ## Open Chrome with *.localtest.me -> 127.0.0.1 and the mkcert CA accepted (separate profile)
-	@spki=$$(openssl x509 -in "$$(mkcert -CAROOT)/rootCA.pem" -pubkey -noout | openssl pkey -pubin -outform der \
-	  | openssl dgst -sha256 -binary | base64); \
+browser: ## Open Chrome with *.localtest.me -> 127.0.0.1 and the gateway certificate accepted (separate profile)
+	@spki=$$(echo | openssl s_client -connect 127.0.0.1:$(GATEWAY_HTTPS_PORT) -servername sso.localtest.me 2>/dev/null \
+	  | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64); \
 	open -na "$(CHROME_APP)" --args --user-data-dir="$$HOME/.shd-chrome" \
 	  --host-resolver-rules="MAP *.localtest.me 127.0.0.1" --ignore-certificate-errors-spki-list="$$spki" \
 	  https://status.localtest.me https://shop.localtest.me
