@@ -173,3 +173,6 @@ httpRoute:
   # Extra rules to other Services in the namespace with a path rewrite, e.g. a web app's same-origin
   # API: [{pathPrefix: /api/orders, service: order, replacePrefix: /orders}].
   extraRules: []
+  # Redirects answered by the gateway itself: [{pathPrefix: /login, path: /}]. Policies of the route
+  # (e.g. an OIDC login) run first, so a protected redirect is a "log in, then go to path" link.
+  redirects: []

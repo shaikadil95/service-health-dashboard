@@ -1,0 +1,27 @@
+/* Icons for the password reveal button of pages rendered by Keycloakify's DefaultPage (they use
+   <i> tags with class names, see login/classes.ts). Inline SVG masks of lucide's eye / eye-off, so
+   nothing is loaded from outside Keycloak. */
+.shd-icon-eye,
+.shd-icon-eye-off {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  background-color: currentColor;
+  mask: var(--shd-icon) center / contain no-repeat;
+}
+
+.shd-icon-eye {
+  --shd-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0'/><circle cx='12' cy='12' r='3'/></svg>");
+}
+
+.shd-icon-eye-off {
+  --shd-icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49'/><path d='M14.084 14.158a3 3 0 0 1-4.242-4.242'/><path d='M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143'/><path d='m2 2 20 20'/></svg>");
+}
+
+/* Tailwind's preflight removes list markers; restore them for the instructions of the pages
+   rendered by DefaultPage (e.g. the steps of login-config-totp.ftl). */
+#kc-content ol:not([class]),
+#kc-content ul:not([class]) {
+  list-style: revert;
+  padding-inline-start: 1.25rem;
+}

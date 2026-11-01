@@ -3,6 +3,7 @@
 # Phase 3: telemetry pipeline and storage (Collector, Prometheus, Loki, Tempo, Grafana, k6).
 # Phase 4: Grafana correlations and dashboards, Status API and status page (web/, pnpm).
 # Phase 5: alert rules (promtool-tested), Alertmanager routing to Mailpit, runbooks, scripts/demo.sh.
+# Phase 6b: landing page, logout to the landing page, branded Keycloak login theme (custom image).
 
 SHELL := /usr/bin/env bash
 .SHELLFLAGS := -euo pipefail -c
@@ -14,12 +15,14 @@ ENGINE ?= $(shell podman info >/dev/null 2>&1 && echo podman || echo docker)
 COMPOSE ?= $(ENGINE) compose
 SERVICES := user-service order-service payment-service status-api
 # Static web apps in the pnpm monorepo web/ (image <app>-web, served by nginx-unprivileged).
-WEB_APPS := status shop
+WEB_APPS := status shop home
 IMAGE_PREFIX ?= localhost/shd
 IMAGE_TAG ?= dev
 COLLECTOR_IMAGE := $(shell awk '/opentelemetry-collector-contrib:/ {print $$2}' compose.yaml)
 SERVICE_IMAGES := $(foreach svc,$(SERVICES),$(IMAGE_PREFIX)/$(svc):$(IMAGE_TAG))
 WEB_IMAGES := $(foreach app,$(WEB_APPS),$(IMAGE_PREFIX)/$(app)-web:$(IMAGE_TAG))
+# Keycloak with the customers realm's login theme (web/apps/keycloak-theme), deploy/keycloak/Dockerfile.
+KEYCLOAK_IMAGE := $(IMAGE_PREFIX)/keycloak:$(IMAGE_TAG)
 
 .PHONY: help
 help: ## Show this help
@@ -67,7 +70,7 @@ rules-test: ## promtool unit tests of every alert rule; Alertmanager routing and
 	$(AMTOOL_RUN) /tests/alertmanager.test.sh
 
 .PHONY: build
-build: ## Build the service and web images with the container engine
+build: ## Build the service, web and Keycloak images with the container engine
 	@for svc in $(SERVICES); do \
 	  echo "==> $(IMAGE_PREFIX)/$$svc:$(IMAGE_TAG)"; \
 	  $(ENGINE) build -f services/Dockerfile --build-arg SERVICE=$$svc \
@@ -78,6 +81,8 @@ build: ## Build the service and web images with the container engine
 	  $(ENGINE) build -f web/Dockerfile --build-arg APP=$$app \
 	    -t $(IMAGE_PREFIX)/$$app-web:$(IMAGE_TAG) web ; \
 	done
+	@echo "==> $(KEYCLOAK_IMAGE)"
+	$(ENGINE) build -f deploy/keycloak/Dockerfile -t $(KEYCLOAK_IMAGE) web
 
 ##@ Web (Phase 4, needs Node >= 20.19 and pnpm; the images build without them)
 
@@ -196,8 +201,8 @@ define kind_load
 endef
 
 .PHONY: images
-images: build ## Build the service and web images and load them into the kind cluster
-	$(call kind_load,$(SERVICE_IMAGES) $(WEB_IMAGES))
+images: build ## Build the service, web and Keycloak images and load them into the kind cluster
+	$(call kind_load,$(SERVICE_IMAGES) $(WEB_IMAGES) $(KEYCLOAK_IMAGE))
 
 # Image for the in-cluster checks of `make verify`. Use the same Docker/Podman loader as the
 # platform images, including its fallback when kind cannot import an image archive.
@@ -222,6 +227,7 @@ deploy: $(CACHE_DIR)/docker-config/config.json ## Namespaces, secrets, local CA,
 	$(HELM_ENV) $(HELMFILE) --file deploy/helmfile.yaml apply --suppress-diff
 	$(KUBECTL_KIND) -n envoy-gateway-system wait --for=condition=Programmed gateway/edge --timeout=300s
 	$(SCRIPT_ENV) GATEWAY_HTTPS_PORT=$(GATEWAY_HTTPS_PORT) deploy/scripts/wait-identity.sh
+	$(SCRIPT_ENV) deploy/scripts/keycloak-realm-sync.sh
 
 # Third-party images referenced by the rendered releases. Images of Helm test pods and of features
 # that are switched off (Envoy rate limit, Thanos sidecar) are not needed.
@@ -256,6 +262,7 @@ status: ## Show nodes, gateway, routes and workloads
 	@echo; $(KUBECTL_KIND) -n loadgen get deploy
 	@echo; $(KUBECTL_KIND) -n identity get keycloak,pods
 	@echo; echo "HTTPS with the mkcert CA (trust it once: mkcert -install). Logins: make sso-users"
+	@echo "Start here: https://home.localtest.me (public landing page; every logout ends there)"
 	@echo "Shop: https://shop.localtest.me   API (bearer token): https://api.localtest.me/orders"
 	@echo "Status page: https://status.localtest.me   Grafana: https://grafana.localtest.me (Keycloak, or admin: make grafana-password)"
 	@echo "SRE only: https://prometheus.localtest.me https://alertmanager.localtest.me https://mail.localtest.me (on-call inbox)"
@@ -270,10 +277,10 @@ grafana-password: ## Print the generated Grafana break-glass admin password (use
 CHROME_APP ?= Google Chrome
 CHROME_PROFILE ?= $(HOME)/.shd-chrome-trusted
 .PHONY: browser
-browser: ## Open Chrome with *.localtest.me -> 127.0.0.1 (separate profile; trust the CA first)
+browser: ## Open the landing page in Chrome with *.localtest.me -> 127.0.0.1 (separate profile; trust the CA first)
 	@open -na "$(CHROME_APP)" --args --user-data-dir="$(CHROME_PROFILE)" \
 	  --host-resolver-rules="MAP *.localtest.me 127.0.0.1" \
-	  https://status.localtest.me https://shop.localtest.me
+	  https://home.localtest.me
 
 .PHONY: sso-users
 sso-users: ## Print the demo logins (Keycloak realms ops and customers, Keycloak admin console)
@@ -295,12 +302,22 @@ load-stop: ## Stop the k6 load generator
 	$(KUBECTL_KIND) -n loadgen scale deployment/loadgen --replicas=0
 
 .PHONY: verify
-verify: verify-image ## Automated checks: platform (2), telemetry (3), visualization (4), alerting (5), identity and SSO (6)
+verify: verify-image ## Automated checks: platform (2), telemetry (3), visualization (4), alerting (5), identity, SSO, login and logout (6, 6b)
 	$(SCRIPT_ENV) GATEWAY_HTTPS_PORT=$(GATEWAY_HTTPS_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify.sh
 	$(SCRIPT_ENV) GATEWAY_HTTPS_PORT=$(GATEWAY_HTTPS_PORT) deploy/scripts/verify-telemetry.sh
 	$(SCRIPT_ENV) GATEWAY_HTTPS_PORT=$(GATEWAY_HTTPS_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify-status.sh
 	$(SCRIPT_ENV) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify-alerting.sh
 	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) GATEWAY_HTTPS_PORT=$(GATEWAY_HTTPS_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify-identity.sh
+
+# Phase 6b browser flows (Playwright, Chromium with *.localtest.me -> 127.0.0.1): landing page, status
+# page login, shared session, logouts to the landing page, branded customer login and an order.
+# Screenshots land in docs/screenshots. Needs Node and pnpm; the browser is downloaded on first use.
+.PHONY: verify-browser
+verify-browser: web-install ## Browser flows with Playwright: login from the landing page, logouts, branded customer login
+	cd web && $(PNPM) --filter e2e exec playwright install chromium
+	@s() { $(KUBECTL_KIND) -n identity get secret realm-secrets -o jsonpath="{.data.$$1}" | base64 -d; }; \
+	cd web && E2E_SRE_PASSWORD="$$(s SRE_PASSWORD)" E2E_CUSTOMER_PASSWORD="$$(s CUSTOMER_PASSWORD)" \
+	  $(PNPM) --filter e2e e2e
 
 .PHONY: demo
 demo: ## Failure scenarios a-d: alerts, emails in Mailpit, inhibition, recovery (scripts/demo.sh all, ~25 min)
@@ -318,7 +335,8 @@ lint-charts: ## helm lint and render the local charts with every values file
 	helm lint --strict deploy/charts/namespace-baseline -f deploy/values/identity-baseline.yaml
 	helm lint --strict deploy/charts/sso -f deploy/values/sso-apps.yaml
 	helm lint --strict deploy/charts/sso -f deploy/values/sso-observability.yaml
-	@for svc in user order payment status-api status-web shop-web; do \
+	helm lint --strict deploy/charts/sso -f deploy/values/sso-edge.yaml
+	@for svc in user order payment status-api status-web shop-web home-web; do \
 	  helm lint --strict deploy/charts/microservice -f deploy/values/$$svc.yaml && \
 	  helm template $$svc deploy/charts/microservice -n apps -f deploy/values/$$svc.yaml > /dev/null || exit 1; \
 	done

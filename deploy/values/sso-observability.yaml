@@ -1,18 +1,15 @@
-# Single sign-on for the monitoring UIs in "observability" (release sso-observability). Grafana is
-# not listed: it uses its own Keycloak OAuth login with role mapping (values/kube-prometheus-stack.yaml).
-oidc:
+# Single sign-on for the monitoring UIs in "observability" (release sso-observability). The login
+# session is the listener-level one (values/sso-edge.yaml); these policies merge into it and add the
+# authorization.
+merge:
+  # Prometheus, Alertmanager and the on-call inbox: SRE only (groups claim of the ops realm).
   - name: ops-ui
     routes: [prometheus, alertmanager, mailpit]
     realm: ops
-    clientId: ops-gateway
-    clientSecret: ops-gateway-oidc
-    # Cookies for .localtest.me with fixed names: one login covers all three hosts.
-    cookieDomain: localtest.me
-    cookieNames:
-      accessToken: ops-access-token
-      idToken: ops-id-token
-    forwardAccessToken: true
-    # Prometheus, Alertmanager and the on-call inbox: SRE only (groups claim of the ops realm).
-    jwt:
-      audiences: [ops-gateway]
-      allowGroups: [sre]
+    audiences: [ops-gateway]
+    allowGroups: [sre]
+
+public:
+  - name: grafana-own-login
+    routes: [grafana]
+    reason: Grafana logs in with Keycloak itself (OAuth, group -> role mapping, values/kube-prometheus-stack.yaml).

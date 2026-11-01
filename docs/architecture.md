@@ -572,10 +572,12 @@ cluster; production would manage realms with a declarative tool such as keycloak
 **Where authentication happens.**
 
 - **At the edge, Envoy Gateway `SecurityPolicy`.** For browser UIs, Envoy's OAuth2 filter runs the authorization code flow with
-  PKCE against Keycloak and keeps the result in **encrypted, HMAC-signed, HTTP-only cookies**. Prometheus, Alertmanager and Mailpit
-  share one policy with `cookieDomain: localtest.me`, so one login covers all three; the forwarded access token is validated again
-  by the JWT filter, whose claims drive the authorization rule "group `sre` only" (other engineers get 403). The status page accepts
-  every engineer. `api.localtest.me` only validates bearer tokens (signature with cached JWKS, `iss`, `aud`, `exp`) and answers 401
+  PKCE against Keycloak and keeps the result in **encrypted, HMAC-signed, HTTP-only cookies**. The engineers' login is one
+  listener-level policy (cookies on `.localtest.me`): the status page's data, Prometheus, Alertmanager and Mailpit merge into it,
+  so one login and one logout cover all four; route-level additions validate the forwarded access token again with the JWT
+  filter, whose claims drive the authorization rule "group `sre` only" on the three monitoring UIs (other engineers get 403).
+  Every route on the listener is protected unless it opts out (landing page, status page shell, Grafana and Keycloak, which log
+  in themselves). `api.localtest.me` only validates bearer tokens (signature with cached JWKS, `iss`, `aud`, `exp`) and answers 401
   without calling a service. Envoy reaches Keycloak at its public URL through the gateway, with a `BackendTLSPolicy` that trusts the
   mkcert CA, so issuer, certificates and redirects are identical for browsers and the cluster.
 - **Grafana** uses its **native Keycloak OAuth** instead of the gateway, because Grafana maps the `groups` claim to its own roles
@@ -596,6 +598,14 @@ cluster; production would manage realms with a declarative tool such as keycloak
   (`forwardAccessToken`). This is the pattern that [OAuth 2.0 for Browser-Based Apps][oauth-bba] recommends as the most secure:
   an XSS bug cannot steal a token. Expired sessions answer `fetch()` calls with 401 instead of a redirect, and the page offers to
   sign in again. A single-page app holding tokens itself (authorization code with PKCE in JavaScript) was the rejected alternative.
+- **Login and logout experience (Phase 6b).** A public landing page (https://home.localtest.me) is the entry point: "Customer
+  login" is a plain link to the shop, which sends the browser to the `customers` realm's **branded login page** (a Keycloakify
+  theme with the shop's shadcn/ui look, shipped in a custom Keycloak image); the engineering tools go through Keycloak's default
+  theme (`ops` realm), so the redirect is visible. Every logout is **RP-initiated**: the gateway deletes its cookies and sends the
+  browser to Keycloak's end-session endpoint with `id_token_hint` and `post_logout_redirect_uri=https://home.localtest.me/`, so the
+  Keycloak session ends too and the next protected page asks for the password again. Envoy Gateway v1.9 does not expose that
+  parameter yet; an `EnvoyPatchPolicy` sets it on Envoy's OAuth2 filter until the upstream field (on Envoy Gateway's main branch)
+  is released ([sequence](diagrams/login-logout-sequence.svg), [details](../deploy/README.md#landing-page-login-and-logout-phase-6b)).
 - **Load generator.** k6 uses a dedicated test client with the client credentials grant (`loadgen`); the password grant stays
   disabled for every client.
 

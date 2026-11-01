@@ -11,7 +11,7 @@
 
 HTTPS_PORT=${GATEWAY_HTTPS_PORT:-443}
 CA_FILE=${CA_FILE:-$(mkcert -CAROOT 2>/dev/null)/rootCA.pem}
-EDGE_HOSTS=(api grafana prometheus alertmanager mail status shop sso)
+EDGE_HOSTS=(api grafana prometheus alertmanager mail status shop sso home)
 _EDGE_RESOLVE=()
 for _h in "${EDGE_HOSTS[@]}"; do _EDGE_RESOLVE+=(--resolve "$_h.localtest.me:$HTTPS_PORT:127.0.0.1"); done
 _EDGE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -44,14 +44,16 @@ client_token() { # <realm> <client id> <namespace of its Secret> <Secret name>
 
 # sso_curl <jar> <curl args with one https:// URL>: curl with the gateway session in <jar>. Envoy
 # renews an expired access token with the refresh token and answers that request with a redirect to
-# the same URL and the new cookies (a browser follows it transparently), so a cheap GET of the host's
-# root refreshes the jar first.
+# the same URL and the new cookies (a browser follows it transparently), so a cheap GET of a
+# protected page of the host refreshes the jar first: its root, or /login on the status page, whose
+# root is public (Phase 6b).
 sso_curl() {
   local jar=$1 arg root=""
   shift
   for arg in "$@"; do
     if [[ $arg == https://* ]]; then
       root=$(sed -E 's#^(https://[^/]+).*#\1/#' <<<"$arg")
+      [[ $root != https://status.localtest.me* ]] || root+=login
       break
     fi
   done

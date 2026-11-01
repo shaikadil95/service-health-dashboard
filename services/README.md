@@ -227,6 +227,7 @@ with an instrumented `httpx` client, and serves the result read-only. OpenAPI do
 | `GET /api/v1/services` | `ServicesResponse` (below), `Cache-Control: no-store` |
 | `GET /api/v1/services/{name}` | One `ServiceStatus`; 404 for a name that is not configured |
 | `GET /api/v1/alerts` | `{"alerts": [Alert], "source": Source, "generated_at"}`: active alerts, critical first, without `severity` `none`/`info` |
+| `GET /api/v1/me` | `{"username", "name", "email", "groups"}`: the signed-in engineer from the access token the gateway forwards, validated again (`AUTH_*`: `ops` realm, audience `ops-gateway`); 401 without a valid token, 404 when authentication is disabled. The status page's "Signed in as" (Phase 6b) |
 | `GET /livez`, `GET /readyz` | Probes. `/readyz` never depends on Prometheus or Alertmanager: the API keeps answering (with `UNKNOWN`) when they are down |
 
 ```jsonc

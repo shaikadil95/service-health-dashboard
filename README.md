@@ -108,6 +108,7 @@ The [architecture document](docs/architecture.md) explains each flow.
 | **4** Visualization | Grafana dashboards and links between signals, Status API, shadcn/ui status page | An injected fault is visible within about one minute |
 | **5** Alerting | Rules, Alertmanager to Mailpit, runbooks, `demo.sh` | Every failure scenario turns the status red and delivers an email |
 | **6** Identity | Keycloak, HTTPS, OIDC and JWT, customer shop page | Customer login and order. SSO for engineers. `401` without a token. |
+| **6b** Login UX | Public landing page, logout back to it, branded customer login (Keycloakify) | Login from the landing page, every logout ends on it, the next protected page asks for the password again |
 | **7** CI/CD | Placeholder: GitHub Actions CI and Argo CD | — |
 
 ## Local URLs
@@ -119,9 +120,10 @@ Trust it once with `mkcert -install`. If your DNS blocks `*.localtest.me`, use `
 
 | URL | What | Who |
 |---|---|---|
-| https://shop.localtest.me | Customer shop: sign in, place and list orders | `customers` realm (demo `customer`, or register) |
+| https://home.localtest.me | **Start here.** Landing page: Customer login, the engineering tools, sign-out buttons; every logout ends here | Public |
+| https://shop.localtest.me | Customer shop: sign in (branded login page), place and list orders | `customers` realm (demo `customer`, or register) |
 | https://api.localtest.me | Order and User APIs (bearer token, audience `shop-api`) | `customers` realm tokens |
-| https://status.localtest.me | Status page; Status API on `/api` | `ops` realm, any engineer |
+| https://status.localtest.me | Status page (Login button, or data straight away with an existing engineers' session); Status API on `/api` | `ops` realm, any engineer |
 | https://grafana.localtest.me | Grafana; `/d/shd-overview` and `/d/shd-service-detail` | `ops` realm (sre → Admin, dev → Editor, viewer → Viewer) or the local admin |
 | https://prometheus.localtest.me | Prometheus | `ops` realm, group `sre` |
 | https://alertmanager.localtest.me | Alertmanager | `ops` realm, group `sre` |
@@ -150,9 +152,8 @@ PostgreSQL, the three services, the Status API, the status page and the shop, an
 make prereqs        # container engine (Podman must be rootful), kind, kubectl, helm 4, helmfile, helm-diff, mkcert
 make up             # kind cluster + images + local CA + Keycloak Operator + helmfile apply + CoreDNS rewrite (first run: ~15-20 min)
 make sso-users      # demo logins (generated per cluster)
-make browser        # optional: Chrome profile with *.localtest.me -> 127.0.0.1 (trust the CA first)
-open https://shop.localtest.me      # sign in as "customer", place an order
-open https://status.localtest.me    # sign in as "sre": one login for status, Prometheus, Alertmanager and Mailpit
+make browser        # optional: Chrome profile with *.localtest.me -> 127.0.0.1 opening the landing page (trust the CA first)
+open https://home.localtest.me      # landing page: "Customer login" (as "customer"), engineering tools (as "sre"), sign out
 make verify         # automated checks of every phase (platform, telemetry, dashboards, alerting, identity)
 make demo           # failure scenarios: break a service -> alert -> email in Mailpit -> status page -> recovery (~30 min)
 make down

@@ -111,13 +111,24 @@ releases:
     disableValidationOnInstall: true
     values: [values/shop-web.yaml]
 
-  # Edge authentication of the routes in "apps" (Phase 6): JWT on api.localtest.me, OIDC login for
-  # the status page and the shop. Needs the routes it targets and Keycloak for the JWKS.
+  # Public landing page (Phase 6b) on home.localtest.me: links to the shop and the engineers' tools,
+  # the logout buttons, and where every logout ends.
+  - name: home-web
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/apps-baseline]
+    disableValidationOnInstall: true
+    values: [values/home-web.yaml]
+
+  # Edge authentication of the routes in "apps" (Phase 6): JWT on api.localtest.me, the shop's own
+  # OIDC login, the status page's data in the engineers' session (sso-edge), public routes. Needs the
+  # routes it targets and Keycloak for the JWKS.
   - name: sso-apps
     namespace: apps
     chart: ./charts/sso
     labels: { tier: apps }
-    needs: [apps/user, apps/order, apps/status-api, apps/status-web, apps/shop-web, identity/identity]
+    needs: [apps/user, apps/order, apps/status-api, apps/status-web, apps/shop-web, apps/home-web, identity/identity]
     disableValidationOnInstall: true # SecurityPolicy, Backend, BackendTLSPolicy
     values: [values/sso-apps.yaml]
 
@@ -206,7 +217,8 @@ releases:
       - observability/blackbox-exporter
     disableValidationOnInstall: true
 
-  # Single sign-on for Prometheus, Alertmanager and Mailpit (Phase 6, ops realm, group sre).
+  # Group authorization for Prometheus, Alertmanager and Mailpit (Phase 6, ops realm, group sre) in
+  # the engineers' session of sso-edge; Grafana keeps its own login.
   - name: sso-observability
     namespace: observability
     chart: ./charts/sso
@@ -214,6 +226,17 @@ releases:
     needs: [observability/observability-config, identity/identity]
     disableValidationOnInstall: true # SecurityPolicy, Backend, BackendTLSPolicy
     values: [values/sso-observability.yaml]
+
+  # Engineers' login session on the HTTPS listener (Phase 6b) and the post-logout redirect. Last of
+  # the edge policies: every route that must stay public (Keycloak, Grafana, home, the status page
+  # shell) has its own policy by then, so the listener-level login never applies to them.
+  - name: sso-edge
+    namespace: envoy-gateway-system
+    chart: ./charts/sso
+    labels: { tier: edge }
+    needs: [identity/identity, apps/sso-apps, observability/sso-observability]
+    disableValidationOnInstall: true # SecurityPolicy, EnvoyPatchPolicy
+    values: [values/sso-edge.yaml]
 
   # --- Identity (namespace "identity", Phase 6) ---------------------------------------------------
   # The Keycloak Operator and its CRDs are applied before helmfile from the official manifests

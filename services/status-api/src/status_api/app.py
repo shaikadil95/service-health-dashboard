@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 
 from shd_telemetry import Telemetry, create_service_app, instrument_httpx_client
+from shd_telemetry.auth import AuthSettings, Principal, current_principal
 
 from . import __version__
 from .config import Settings
-from .models import AlertsResponse, ServicesResponse, ServiceStatus
+from .models import AlertsResponse, Me, ServicesResponse, ServiceStatus
 from .service import StatusService
 from .sources import AlertmanagerClient, PrometheusClient
 
@@ -48,6 +50,22 @@ def _router() -> APIRouter:
         cache_control(response)
         return (await status_service(request).snapshot()).alerts
 
+    @router.get("/me", responses={404: {"description": "No signed-in user"}})
+    async def me(
+        response: Response, principal: Annotated[Principal, Depends(current_principal)]
+    ) -> Me:
+        """The signed-in engineer, from the access token that the gateway forwards (validated again
+        here: signature, ``iss``, ``aud``, ``exp``). The page shows the name and the groups."""
+        cache_control(response)
+        if not principal.authenticated:
+            raise HTTPException(status_code=404, detail="No signed-in user")
+        return Me(
+            username=principal.username or principal.subject,
+            name=principal.name,
+            email=principal.email,
+            groups=sorted(principal.groups),
+        )
+
     return router
 
 
@@ -55,8 +73,11 @@ def create_app(
     telemetry: Telemetry,
     settings: Settings,
     transport: httpx.AsyncBaseTransport | None = None,
+    auth: AuthSettings | None = None,
+    jwks_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
-    """``transport`` replaces the network in tests (httpx.MockTransport)."""
+    """``transport`` and ``jwks_transport`` replace the network in tests (httpx.MockTransport);
+    ``auth`` defaults to ``AuthSettings.from_env()`` (only ``/api/v1/me`` reads the token)."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -83,7 +104,12 @@ def create_app(
     # /readyz only reflects this process (started, not draining): the API keeps answering with
     # UNKNOWN when Prometheus or Alertmanager is down, so it must stay in the Service endpoints.
     app = create_service_app(
-        title="Status API", version=__version__, telemetry=telemetry, lifespan=lifespan
+        title="Status API",
+        version=__version__,
+        telemetry=telemetry,
+        lifespan=lifespan,
+        auth=auth,
+        jwks_transport=jwks_transport,
     )
     app.include_router(_router())
     return app

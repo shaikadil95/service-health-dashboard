@@ -1,4 +1,4 @@
-# Local Kubernetes platform (Phases 2–6)
+# Local Kubernetes platform (Phases 2–6b)
 
 One command creates a single-node [kind](https://kind.sigs.k8s.io/) cluster on Docker or Podman, installs
 [Envoy Gateway](https://gateway.envoyproxy.io/) as the edge, deploys the User, Order and Payment services with
@@ -9,7 +9,8 @@ status page on https://status.localtest.me (Phase 4, [details](#visualization-an
 promtool-tested rules, Alertmanager routing and inhibition, email to Mailpit on https://mail.localtest.me, runbooks and a
 default-deny NetworkPolicy for `observability` (Phase 5, [details](#alerting-and-notification-phase-5)), then HTTPS with a local CA,
 Keycloak single sign-on for every UI, JWT-protected APIs, client credentials between services and a customer shop
-(Phase 6, [details](#identity-and-single-sign-on-phase-6)).
+(Phase 6, [details](#identity-and-single-sign-on-phase-6)), and a public landing page on https://home.localtest.me where every logout
+ends, plus a branded login page for customers (Phase 6b, [details](#landing-page-login-and-logout-phase-6b)).
 
 ```bash
 make up       # prereqs -> kind cluster -> images (services + stack) -> CA, secrets, Keycloak Operator, CoreDNS rewrite -> helmfile apply -> wait for SSO -> status
@@ -92,16 +93,17 @@ namespace baseline and the services; the Prometheus Operator CRDs before everyth
 |---|---|
 | `make prereqs` | Engine reachable (Podman must be **rootful**), ≥ 4 CPUs / 8 GiB, kind ≥ 0.33, kubectl within skew of the node image, Helm 4, helm-diff, helmfile |
 | `make cluster-up` / `cluster-down` | Create (idempotent) or delete the kind cluster |
-| `make images` | `make build` (the four Python images and the `status-web` image from [`../web/Dockerfile`](../web/Dockerfile)), then load them into kind. Docker: `kind load docker-image`. Podman: `podman save -m` to one archive → `kind load image-archive` |
+| `make images` | `make build` (the four Python images, the `status-web`, `shop-web` and `home-web` images from [`../web/Dockerfile`](../web/Dockerfile) and the Keycloak image with the customers' login theme from [`keycloak/Dockerfile`](keycloak/Dockerfile)), then load them into kind. Docker: `kind load docker-image`. Podman: `podman save -m` to one archive → `kind load image-archive` |
 | `make platform-images` | Renders the releases (`helmfile template`), pulls the third-party images that are not on the node yet with the engine (4 in parallel) and loads them into kind ([`scripts/preload-images.sh`](scripts/preload-images.sh)) |
-| `make deploy` | Namespaces with PSA labels → Grafana admin Secret (once) → mkcert CA into the cluster → identity secrets (once) → Keycloak Operator and CRDs → CoreDNS rewrite → `helmfile apply` → wait for `Gateway` `Programmed` → wait until Keycloak serves both realms through the gateway ([`scripts/wait-identity.sh`](scripts/wait-identity.sh)). Idempotent |
+| `make deploy` | Namespaces with PSA labels → Grafana admin Secret (once) → mkcert CA into the cluster → identity secrets (once) → Keycloak Operator and CRDs → CoreDNS rewrite → `helmfile apply` → wait for `Gateway` `Programmed` → wait until Keycloak serves both realms through the gateway ([`scripts/wait-identity.sh`](scripts/wait-identity.sh)) → apply the Phase 6b realm settings to existing realms ([`scripts/keycloak-realm-sync.sh`](scripts/keycloak-realm-sync.sh)). Idempotent |
 | `make up` / `make down` | `cluster-up images platform-images deploy status` / `cluster-down` |
 | `make grafana-password` | Prints the generated Grafana break-glass admin password (user `admin`) |
 | `make sso-users` | Prints the demo logins of the `ops` and `customers` realms and the Keycloak admin |
-| `make browser` | Opens Chrome with a separate profile that maps `*.localtest.me` to 127.0.0.1 (trust the mkcert CA first) |
+| `make browser` | Opens the landing page in Chrome with a separate profile that maps `*.localtest.me` to 127.0.0.1 (trust the mkcert CA first) |
 | `make load-start` / `load-stop` | Scale the k6 load generator to 1 / 0 replicas |
 | `make redeploy` | Rebuild and reload the images, then `rollout restart` the services (the tag stays `dev`) |
 | `make status` | Nodes, Gateway and HTTPRoutes, Envoy Service, workloads and NetworkPolicies |
+| `make verify-browser` | Phase 6b browser flows with Playwright (Chromium, `*.localtest.me` mapped to 127.0.0.1): landing page → status page Login → Keycloak (default theme) → data; Prometheus in the same session; sign out → landing page → password asked again; Grafana's Keycloak session makes the status page's Login password-free; Customer login → branded page → order → Sign out → landing page. Writes the screenshots in `docs/screenshots` |
 | `make verify` | Loads the `curl` test image into kind, then runs [`scripts/verify.sh`](scripts/verify.sh), [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh) and [`scripts/verify-status.sh`](scripts/verify-status.sh), see [Verification](#verification) |
 | `make web-check` / `web-dev` | Web monorepo: Prettier, ESLint, typecheck, Vitest, build / Vite dev server (needs Node and pnpm, see [`../web`](../web/README.md)) |
 | `make rules-lint` / `rules-test` | `promtool check rules`, `amtool check-config` / promtool unit tests and Alertmanager routing and template tests (part of `make lint` / `make test`) |
@@ -522,25 +524,36 @@ generates all client secrets and demo passwords once per cluster and copies each
 realm in the admin console (or `kubectl -n identity exec keycloak-0 -- /opt/keycloak/bin/kcadm.sh …`), delete the
 `KeycloakRealmImport`, and run `make deploy`; or recreate the cluster.
 
-**Edge authentication** (release `sso-apps` in `apps`, `sso-observability` in `observability`, chart [`sso`](charts/sso)):
+**Edge authentication** (chart [`sso`](charts/sso): releases `sso-edge` in `envoy-gateway-system`, `sso-apps` in `apps`,
+`sso-observability` in `observability`). Since Phase 6b the engineers' login is a **listener-level** `SecurityPolicy` on the Gateway's
+HTTPS listener, so a new route is protected by default; route-level policies either merge into it, replace it with their own login,
+or declare the route public:
 
 | Policy | Routes | What Envoy does |
 |---|---|---|
-| `ops-ui` | `prometheus`, `alertmanager`, `mailpit` | OIDC login (`ops` realm, client `ops-gateway`, PKCE), cookies `ops-access-token`/`ops-id-token` on `.localtest.me` (one login for all three), access token forwarded and validated by the JWT filter (audience `ops-gateway`), authorization: `groups` contains `sre`, else 403 |
-| `status-ui` | `status-web`, `status-api` | OIDC login (`ops` realm), every engineer |
-| `shop` | `shop-web` (incl. `/api/orders` → order, `/api/me` → user) | OIDC login (`customers` realm, client `shop-gateway`), access token forwarded to the services (backend for frontend) |
+| `ops-session` (Gateway `edge`, listener `https`) | every route without a policy of its own | OIDC login (`ops` realm, client `ops-gateway`), cookies `ops-access-token`/`ops-id-token` and the rest on `.localtest.me`, access token forwarded, `fetch()` → 401 |
+| `ops-ui` (merged) | `prometheus`, `alertmanager`, `mailpit` | the `ops-session` login + JWT validation of the forwarded token (audience `ops-gateway`) + authorization: `groups` contains `sre`, else 403 |
+| `status-api` (merged) | `status-api` (`/api`, `/oauth2`, `/login` on `status.localtest.me`) | the `ops-session` login + JWT validation, every engineer |
+| `shop` (own login) | `shop-web` (incl. `/api/orders` → order, `/api/me` → user) | OIDC login (`customers` realm, client `shop-gateway`, own cookies), access token forwarded to the services (backend for frontend) |
 | `api` | `order`, `user` on `api.localtest.me` | JWT only: `customers` realm, audience `shop-api`, otherwise 401 |
+| `home`, `status-page-shell`, `grafana-own-login`, `keycloak-public` | `home-web`, `status-web`, `grafana`, `keycloak` | Public: a route-level policy without authentication replaces the listener-level login (Grafana and Keycloak log in themselves) |
+
+Merging (`mergeType: StrategicMerge`, Envoy Gateway ≥ 1.6) is what makes one session span namespaces: Envoy Gateway names the OIDC
+cookies after the policy that **owns** the OIDC configuration (a hash of its UID). Two route-level policies with the same client and
+`cookieDomain` would still set differently named HMAC and refresh cookies and log each other out; merged policies all use
+`ops-session`'s cookies, so one login and one logout cover the status page, Prometheus, Alertmanager and Mailpit.
 
 The OIDC policies use `redirectURL: https://%REQ(:authority)%/oauth2/callback` (one policy, several hosts), `logoutPath:
-/oauth2/logout`, and `denyRedirect` for requests with `X-Requested-With: fetch` (the web apps' API calls get 401 instead of a login
-page). Envoy reaches Keycloak for the code exchange and the JWKS at its public URL, served by the gateway itself: the policies'
+/oauth2/logout` with `endSessionEndpoint` (RP-initiated logout, see [below](#landing-page-login-and-logout-phase-6b)), and
+`denyRedirect` for requests with `X-Requested-With: fetch` (the web apps' API calls get 401 instead of a login page). Envoy reaches Keycloak for the code exchange and the JWKS at its public URL, served by the gateway itself: the policies'
 `backendRefs` point to the gateway's own Service `envoy-edge` (port 443, EDS endpoints; a `ReferenceGrant` in the edge chart allows
 it), and a `BackendTLSPolicy` on that Service sets the TLS name `sso.localtest.me` and trusts the mkcert CA, following the
 [Envoy Gateway OIDC task](https://gateway.envoyproxy.io/docs/tasks/security/oidc/#connect-to-an-oidc-provider-with-self-signed-certificate);
 calls are retried on transient failures. (A DNS-resolved `Backend` for `sso.localtest.me` was tried first: its endpoints briefly
 disappeared when cluster DNS answers were empty, which failed logins with "no healthy upstream".) Envoy renews expired access tokens with the refresh token (a redirect to the same URL with new
-cookies). Grafana is not behind a policy: it uses its own Keycloak OAuth (`ops` realm, client `grafana`, PKCE,
-`role_attribute_path` on `groups`, strict) and keeps the local admin as break-glass access.
+cookies). Grafana's route is public at the edge (`grafana-own-login`): it uses its own Keycloak OAuth (`ops` realm, client `grafana`,
+PKCE, `role_attribute_path` on `groups`, strict), keeps the local admin as break-glass access, and its Sign out ends the Keycloak
+session too (`signout_redirect_url`, Grafana adds `id_token_hint`) and lands on the landing page.
 
 **Services and load generator.** `auth.enabled` in the microservice chart sets `AUTH_*` (and `OAUTH_*` for client credentials),
 mounts the CA and adds egress to the Envoy proxies (port 10443) to the service's NetworkPolicy: the services fetch the JWKS and
@@ -558,6 +571,78 @@ traces show up in Tempo and in the service graph (gateway → keycloak → postg
 `TokenLatencyHigh` ([rules](charts/alerting/rules/identity.rules.yaml), [runbooks](../docs/runbooks/README.md)); the Overview
 dashboard has two more panels: Sign-ins (Keycloak) and Rejected requests (401/403). `scripts/demo.sh e` scales Keycloak to 0.
 
+## Landing page, login and logout (Phase 6b)
+
+![Landing page](../docs/screenshots/home.png)
+
+[Sequence diagram](../docs/diagrams/login-logout-sequence.svg) ([source](../docs/diagrams/login-logout-sequence.mmd)).
+
+**Landing page.** https://home.localtest.me (release `home-web`, [`../web/apps/home`](../web/apps/home), nginx-unprivileged like the
+other web apps, NetworkPolicy: ingress from the Envoy proxies only) is **public** (route policy `home`). It has one explicit login,
+**Customer login**, a full-page link to `https://shop.localtest.me/`: the gateway has no shop session, redirects to Keycloak's
+`customers` realm (the branded page below) and back to the shop. The engineering cards link to the status page, Grafana, Prometheus,
+Alertmanager, Mailpit and the Keycloak admin console; each one visibly goes through `sso.localtest.me` (realm `ops`, Keycloak's
+default theme) unless a session exists. Two buttons sign out of the engineers' tools and of the shop.
+
+**Status page.** Its static files are public (`status-page-shell`); its data is not. `/api`, `/login` and `/oauth2` on
+`status.localtest.me` belong to the `status-api` route, which merges into the engineers' session. The page calls `/api/v1/me` and
+`/api/v1/services` with `X-Requested-With: fetch`:
+
+- **gateway session exists** (e.g. after opening Prometheus: same cookies on `.localtest.me`): the data shows at once, with
+  "Signed in as *name* (*groups*)" from `/api/v1/me` (the Status API validates the forwarded access token itself) and **Logout**;
+- **no gateway session**: 401 (`denyRedirect`), the page shows **Login**, a full-page link to `/login`. The gateway runs the OIDC flow;
+  if Keycloak already has a session (e.g. after Grafana's own Keycloak login) it returns without a password. After the callback the
+  route answers `/login` with `302 /` (a Gateway API `RequestRedirect`).
+
+A silent check on page load (`prompt=none`, fall back to the button on `login_required`) was not used: `SecurityPolicy.oidc` in
+Envoy Gateway v1.9 cannot add `prompt` to the authorization request, and a redirect on page load is exactly what the page should not
+do.
+
+**Logout → landing page.** Every OIDC policy sets `logoutPath: /oauth2/logout` and Keycloak's `endSessionEndpoint`. On the logout
+path Envoy's OAuth2 filter deletes its cookies (with `Domain=localtest.me` for the engineers' session) and redirects to Keycloak's
+end-session endpoint with `id_token_hint`, `client_id` and `post_logout_redirect_uri` ([OpenID Connect RP-Initiated
+Logout](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)); Keycloak ends its session and sends the browser to that URI,
+which is registered on the clients (`post.logout.redirect.uris` of `ops-gateway`, `shop-gateway` and `grafana`). The next protected
+page therefore asks for the password again.
+
+The URI has to be `https://home.localtest.me/`. Envoy (v1.39) has the field
+[`post_logout_redirect_uri`](https://www.envoyproxy.io/docs/envoy/v1.39.0/api-v3/extensions/filters/http/oauth2/v3/oauth.proto),
+but Envoy Gateway v1.9's `SecurityPolicy` does not expose it (`oidc.postLogoutRedirect` exists on Envoy Gateway's main branch only), and
+without it Envoy sends `https://<host>/`, the protected page itself, which would start a new login right away. The release
+`sso-edge` therefore adds one `EnvoyPatchPolicy` ([`charts/sso/templates/logout-redirect.yaml`](charts/sso/templates/logout-redirect.yaml)):
+a JSONPatch on the HTTPS listener's route configuration that adds `post_logout_redirect_uri.uri` to every route's OAuth2 per-route
+configuration (selected with a JSONPath, so new routes are covered). EnvoyPatchPolicy is off by default and is enabled in
+[`values/envoy-gateway.yaml`](values/envoy-gateway.yaml). It depends on Envoy Gateway's generated xDS names, so `make verify` checks
+that it is `Programmed` and that each logout really lands on the landing page; replace it with `oidc.postLogoutRedirect` after
+upgrading to a release that has the field. Alternatives considered: registering a public "logged out" page per host (still needs
+the parameter), or a logout page that calls Keycloak itself (needs the ID token in the browser).
+
+| Sign out from | Ends | Lands on |
+|---|---|---|
+| Landing page "Sign out of engineering tools", status page **Logout** (`status.localtest.me/oauth2/logout`) | the engineers' gateway session (status page, Prometheus, Alertmanager, Mailpit) and the `ops` Keycloak session | home |
+| Landing page "Sign out of the shop", shop **Sign out** (`shop.localtest.me/oauth2/logout`) | the shop's gateway session and the `customers` Keycloak session | home |
+| Grafana **Sign out** | Grafana's session and the `ops` Keycloak session | home |
+
+Grafana's own session is separate: after an engineers' logout elsewhere it lasts until its next token refresh fails (access tokens
+live 5 minutes) or its own Sign out.
+
+**Branded customer login.** The `customers` realm uses the login theme `shd-shop` (`loginTheme`), built with
+[Keycloakify](https://docs.keycloakify.dev) from [`../web/apps/keycloak-theme`](../web/apps/keycloak-theme) with the shop's shadcn/ui
+components and Tailwind tokens (`@workspace/ui`): login, registration, password reset (emails to Mailpit), error and the other login
+pages. The `ops` realm keeps Keycloak's default theme. The theme JAR goes into a custom image, [`keycloak/Dockerfile`](keycloak/Dockerfile):
+`quay.io/keycloak/keycloak:26.8.1` + the JAR in `/opt/keycloak/providers` + `kc.sh build` with the same build-time options as the
+`Keycloak` CR, as the [container guide](https://www.keycloak.org/server/containers) describes. The `Keycloak` CR sets `image:
+localhost/shd/keycloak:dev` (loaded into kind by `make images`); the operator starts a custom image with `--optimized`.
+Measured on a clean cluster: image 484 MB (stock 479 MB); Keycloak's working set ~600 MiB (peak 626 MiB in 1 h) against ~620 MiB
+(peak 667 MiB) with the stock image, i.e. no measurable RAM cost; the landing page's nginx adds ~5 MiB.
+
+![Branded login page of the customers realm](../docs/screenshots/customer-login.png)
+
+**Realm changes on an existing cluster.** A `KeycloakRealmImport` only creates a realm. [`scripts/keycloak-realm-sync.sh`](scripts/keycloak-realm-sync.sh)
+(last step of `make deploy`) applies the Phase 6b settings (login theme, password reset and SMTP, post-logout redirect URIs) to
+existing realms with `kcadm.sh` inside the Keycloak pod (bootstrap admin); on a new cluster the import has set them already and the
+script changes nothing. The realm YAML stays the source of truth.
+
 ## Verification
 
 `make verify` runs the automated checks against the running cluster, one script per phase:
@@ -567,7 +652,7 @@ dashboard has two more panels: Sign-ins (Keycloak) and Rejected requests (401/40
 | [`scripts/verify.sh`](scripts/verify.sh) | Phase 2: gateway and routes from the host (`curl --resolve`, so the host resolver does not matter) and from a throwaway pod in a `netcheck` namespace (CoreDNS rewrite), what is *not* exposed at the edge, the `apps` NetworkPolicies, and readiness (a not-ready pod leaves the endpoints and is not restarted) |
 | [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh) | Phase 3: observability pods and PVCs, metrics/logs/traces of all three services in Prometheus, Loki and Tempo, the service graph, exemplars, blocked write endpoints at the edge, Grafana login and datasources |
 | [`scripts/verify-status.sh`](scripts/verify-status.sh) | Phase 4: status page and Status API contract, NetworkPolicies of the status workloads, both dashboards have data for every service, and the signal correlations followed end to end |
-| [`scripts/verify-identity.sh`](scripts/verify-identity.sh) | Phase 6: Keycloak, PostgreSQL and realm imports ready; the served certificate; HTTPS on every host and the HTTP redirects; SSO (no session → Keycloak, `fetch()` → 401, `sre` reaches all four UIs with one login, `viewer` gets 403 on Prometheus/Alertmanager/Mailpit); Grafana roles per group and the break-glass admin; API 401 for missing and forged tokens and 201 with a client-credentials token, 401s not counted as 5xx; the shop flow (login, profile, order, list); Order's client-credentials call to Payment with the customer in the audit log; Keycloak metrics and alert rules; `identity` NetworkPolicies |
+| [`scripts/verify-identity.sh`](scripts/verify-identity.sh) | Phase 6: Keycloak, PostgreSQL and realm imports ready; the served certificate; HTTPS on every host and the HTTP redirects; SSO (no session → Keycloak, `fetch()` → 401, `sre` reaches all four UIs with one login, `viewer` gets 403 on Prometheus/Alertmanager/Mailpit); Grafana roles per group and the break-glass admin; API 401 for missing and forged tokens and 201 with a client-credentials token, 401s not counted as 5xx; the shop flow (login, profile, order, list); Order's client-credentials call to Payment with the customer in the audit log; Keycloak metrics and alert rules; `identity` NetworkPolicies. Phase 6b: the public landing page and status page shell; the policies and the `EnvoyPatchPolicy` accepted; one Prometheus login gives the status page data; logout (status page, Grafana, shop) → Keycloak → landing page, after which the next protected page shows a password form; a Keycloak session from Grafana makes the status page's Login password-free; the branded `customers` login and registration pages and the default `ops` theme |
 | [`scripts/verify-alerting.sh`](scripts/verify-alerting.sh) | Phase 5: the project's rules loaded and healthy, recording rules have data, Watchdog firing, Alertmanager runs the project's configuration, a test alert arrives as email in Mailpit, every scrape target is up under the `observability` default deny, and direct access from another namespace is blocked. The failure scenarios themselves run with `make demo` |
 
 Each check prints `PASS`/`FAIL` and the script exits non-zero on any failure. The checks retry while the first export and

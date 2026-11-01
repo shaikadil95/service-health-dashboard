@@ -179,6 +179,9 @@ grafana:
       role_attribute_path: "contains(groups[*], 'sre') && 'Admin' || contains(groups[*], 'dev') && 'Editor' || contains(groups[*], 'viewer') && 'Viewer'"
       role_attribute_strict: true
       allow_assign_grafana_admin: false
+      # Sign out ends the Keycloak session too (RP-initiated logout; Grafana adds id_token_hint) and
+      # lands on the landing page.
+      signout_redirect_url: https://sso.localtest.me/realms/ops/protocol/openid-connect/logout?client_id=grafana&post_logout_redirect_uri=https%3A%2F%2Fhome.localtest.me%2F
     analytics:
       reporting_enabled: false
       check_for_updates: false

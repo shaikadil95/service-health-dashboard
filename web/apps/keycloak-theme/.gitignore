@@ -1,0 +1,3 @@
+/dist_keycloak
+# Copied by Keycloakify for `pnpm dev` (Keycloak's default theme resources).
+/public/keycloakify-dev-resources

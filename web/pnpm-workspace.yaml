@@ -1,6 +1,8 @@
 packages:
   - "apps/*"
   - "packages/*"
+  # Browser flows against the running cluster (make verify-browser); not part of turbo's pipeline.
+  - "e2e"
 
 allowBuilds:
   esbuild: true

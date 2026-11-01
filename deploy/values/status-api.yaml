@@ -15,6 +15,13 @@ env:
   ERROR_RATIO_THRESHOLD: "0.05"
   LATENCY_P95_THRESHOLD_MS: "500"
 
+# GET /api/v1/me validates the access token that the gateway forwards (ops realm, audience
+# ops-gateway) to show who is signed in. The other endpoints are authenticated by the gateway.
+auth:
+  enabled: true
+  issuer: https://sso.localtest.me/realms/ops
+  audiences: [ops-gateway]
+
 networkPolicy:
   ingressFrom:
     - namespaceSelector:
@@ -56,5 +63,11 @@ networkPolicy:
 httpRoute:
   enabled: true
   hostnames: [status.localtest.me]
-  # /api/v1/... only; /admin, /docs and the probes stay inside the cluster.
-  pathPrefixes: [/api]
+  # /api/v1/... only; /admin, /docs and the probes stay inside the cluster. The route also carries the
+  # paths of the engineers' login (SecurityPolicy status-api, values/sso-apps.yaml): /oauth2/callback
+  # and /oauth2/logout (answered by Envoy's OIDC filter) and /login, the status page's Login button:
+  # log in, then back to the page.
+  pathPrefixes: [/api, /oauth2]
+  redirects:
+    - pathPrefix: /login
+      path: /

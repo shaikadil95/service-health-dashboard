@@ -14,7 +14,10 @@ secrets:
   realm: realm-secrets        # client secrets and demo user passwords (realm import placeholders)
 
 keycloak:
-  # Image of the server: the operator's default for its own version (quay.io/keycloak/keycloak:26.8.1).
+  # Custom image (deploy/keycloak/Dockerfile, `make images`): quay.io/keycloak/keycloak:26.8.1 plus the
+  # customers realm's login theme, built with `kc.sh build`. The operator starts a custom image with
+  # --optimized, so its build-time options must match the CR (see the Dockerfile).
+  image: localhost/shd/keycloak:dev
   instances: 1
   # Defaults of the operator are 1700Mi requests / 2Gi limits; sized for a laptop. The JVM heap is
   # a percentage of the limit (Keycloak's container defaults).

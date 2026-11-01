@@ -9,6 +9,7 @@ To render an SVG again, run `npx -y @mermaid-js/mermaid-cli -i <name>.mmd -o <na
 | Telemetry data flow (push and pull) | [telemetry-flow.mmd](telemetry-flow.mmd) | [telemetry-flow.svg](telemetry-flow.svg) | [architecture §4](../architecture.md#4-main-data-flows) |
 | Detection and notification sequence | [alerting-sequence.mmd](alerting-sequence.mmd) | [alerting-sequence.svg](alerting-sequence.svg) | [architecture §4, flow 3](../architecture.md#flow-3-detection-and-notification) |
 | Identity and SSO sequence | [identity-sso-sequence.mmd](identity-sso-sequence.mmd) | [identity-sso-sequence.svg](identity-sso-sequence.svg) | [architecture §10](../architecture.md#10-security-and-identity) |
+| Landing page, login and logout sequence | [login-logout-sequence.mmd](login-logout-sequence.mmd) | [login-logout-sequence.svg](login-logout-sequence.svg) | [deploy/README](../../deploy/README.md#landing-page-login-and-logout-phase-6b) |
 
 ![Architecture overview](overview.svg)
 
@@ -17,3 +18,5 @@ To render an SVG again, run `npx -y @mermaid-js/mermaid-cli -i <name>.mmd -o <na
 ![Detection and notification](alerting-sequence.svg)
 
 ![Identity and SSO](identity-sso-sequence.svg)
+
+![Landing page, login and logout](login-logout-sequence.svg)

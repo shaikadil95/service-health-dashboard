@@ -160,6 +160,16 @@ policies:
                 app.kubernetes.io/name: alertmanager
         ports:
           - { port: 1025, protocol: TCP }
+      # Keycloak's password-reset emails (customers realm): the demo's only mail server.
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: identity
+            podSelector:
+              matchLabels:
+                app: keycloak
+        ports:
+          - { port: 1025, protocol: TCP }
       - from:
           - namespaceSelector:
               matchLabels:

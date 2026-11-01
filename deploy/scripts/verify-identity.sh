@@ -15,6 +15,12 @@
 #      with no token in the browser; Order -> User/Payment with its own client-credentials token,
 #      the customer's subject in their audit logs.
 #   6. Identity observability: Keycloak scraped, user event metrics, NetworkPolicies of identity.
+#   7. Landing page, logout and branded login (Phase 6b): home is public; the status page shell is
+#      public and its data needs the engineers' session, which is shared with Prometheus,
+#      Alertmanager and Mailpit (one login, one logout) and skipped when Keycloak already has a
+#      session (Grafana login); every logout ends Envoy's and Keycloak's sessions and lands on
+#      https://home.localtest.me, after which a protected page asks for the password again; the
+#      customers realm uses the branded Keycloakify theme (custom image), ops the default theme.
 # KeycloakDown is exercised by `scripts/demo.sh e` (scales Keycloak to 0).
 set -euo pipefail
 
@@ -92,13 +98,13 @@ issuer=$(echo | openssl s_client -connect 127.0.0.1:"$HTTPS_PORT" -servername gr
 [[ $issuer == *mkcert* && $issuer == *'*.localtest.me'* ]] && ok "served certificate: $issuer" || ko "served certificate: $issuer"
 
 echo "== 2. HTTPS and redirects"
-for host in api grafana prometheus alertmanager mail status shop sso; do
+for host in api grafana prometheus alertmanager mail status shop sso home; do
   c=$(code "$(edge_url $host.localtest.me /)")
   [[ $c =~ ^(200|302|401|404)$ ]] && ok "https://$host.localtest.me: TLS verified with the mkcert CA -> $c" ||
     ko "https://$host.localtest.me -> $c"
 done
 http_port=${GATEWAY_HTTP_PORT:-80}
-for host in grafana prometheus status shop sso; do
+for host in grafana prometheus status shop sso home; do
   expect "http://$host.localtest.me/x -> https" "301 https://$host.localtest.me/x" \
     "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --resolve "$host.localtest.me:$http_port:127.0.0.1" "http://$host.localtest.me:$http_port/x")"
 done
@@ -106,9 +112,9 @@ expect "http://api.localtest.me/orders (no plain-HTTP API, no redirect)" 404 \
   "$(curl -s -o /dev/null -w '%{http_code}' --resolve "api.localtest.me:$http_port:127.0.0.1" "http://api.localtest.me:$http_port/orders")"
 
 echo "== 3. Single sign-on (ops realm)"
-for host in prometheus alertmanager mail status; do
-  expect "https://$host.localtest.me without a session" "302 https://sso.localtest.me/realms/ops/" \
-    "$(edge_curl -o /dev/null -w '%{http_code} %{redirect_url}' "$(edge_url $host.localtest.me /)" | cut -c1-40)"
+for target in prometheus.localtest.me/ alertmanager.localtest.me/ mail.localtest.me/ status.localtest.me/login; do
+  expect "https://$target without a session" "302 https://sso.localtest.me/realms/ops/" \
+    "$(edge_curl -o /dev/null -w '%{http_code} %{redirect_url}' "$(edge_url "${target%%/*}" "/${target#*/}")" | cut -c1-40)"
 done
 expect "fetch() without a session (X-Requested-With) gets 401, not a redirect" 401 \
   "$(code -H 'X-Requested-With: fetch' "$(edge_url status.localtest.me /api/v1/services)")"
@@ -116,9 +122,13 @@ P=$(edge_url prometheus.localtest.me '/api/v1/query?query=up')
 A=$(edge_url alertmanager.localtest.me /api/v2/status)
 M=$(edge_url mail.localtest.me /api/v1/messages)
 S=$(edge_url status.localtest.me /api/v1/services)
-out=$(login_as sre "$P" "$A" "$M" "$S" || true)
+ME=$(edge_url status.localtest.me /api/v1/me)
+out=$(login_as sre "$P" "$A" "$M" "$S" "$ME" || true)
 expect "sre, one login: Prometheus, Alertmanager, Mailpit, status page" "200 200 200 200" \
   "$(status_of "$P" <<<"$out") $(status_of "$A" <<<"$out") $(status_of "$M" <<<"$out") $(status_of "$S" <<<"$out")"
+expect "status page /api/v1/me in the same session (token validated by the Status API)" \
+  '200 "name":"Sam Reliability" "groups":["sre"]' \
+  "$(status_of "$ME" <<<"$out") $(awk -v u="$ME" '$2 == u' <<<"$out" | grep -o '"name":"[^"]*"') $(awk -v u="$ME" '$2 == u' <<<"$out" | grep -o '"groups":\[[^]]*\]')"
 out=$(login_as viewer "$P" "$A" "$M" "$S" || true)
 expect "viewer: Prometheus, Alertmanager, Mailpit denied (group sre only), status page allowed" "403 403 403 200" \
   "$(status_of "$P" <<<"$out") $(status_of "$A" <<<"$out") $(status_of "$M" <<<"$out") $(status_of "$S" <<<"$out")"
@@ -214,6 +224,79 @@ expect "pod outside identity -> Keycloak HTTP port directly (blocked: forwarded 
 # A TCP connect to PostgreSQL: time_connect stays 0 when the connection is refused or dropped.
 expect "pod outside identity -> PostgreSQL 5432 (blocked)" "0.000000" \
   "$($KUBECTL -n "$CHECK_NS" exec curl -- curl -s -m 3 -o /dev/null -w '%{time_connect}' telnet://postgres.identity:5432 2>/dev/null || true)"
+
+echo "== 7. Landing page, logout and branded customer login (Phase 6b)"
+HOME_URL=$(edge_url home.localtest.me /)
+expect "https://home.localtest.me is public (no login)" "200" "$(code "$HOME_URL")"
+expect "landing page title" "Service Health Dashboard" \
+  "$(edge_curl "$HOME_URL" | sed -n 's:.*<title>\(.*\)</title>.*:\1:p')"
+expect "architecture diagram on the landing page" "200 image/svg+xml" \
+  "$(edge_curl -o /dev/null -w '%{http_code} %{content_type}' "$(edge_url home.localtest.me /architecture.svg)")"
+expect "status page shell is public (Login button until /api answers)" 200 "$(code "$(edge_url status.localtest.me /)")"
+expect "EnvoyPatchPolicy post-logout-redirect programmed" "True" \
+  "$($KUBECTL -n envoy-gateway-system get envoypatchpolicy post-logout-redirect -o jsonpath='{.status.ancestors[0].conditions[?(@.type=="Programmed")].status}')"
+for sp in envoy-gateway-system/ops-session observability/ops-ui apps/status-api apps/shop identity/keycloak-public observability/grafana-own-login apps/home apps/status-page-shell; do
+  expect "SecurityPolicy $sp accepted" True \
+    "$($KUBECTL -n "${sp%%/*}" get securitypolicy "${sp#*/}" -o jsonpath='{.status.ancestors[0].conditions[?(@.type=="Accepted")].status}')"
+done
+expect "Keycloak runs the custom image (theme)" "localhost/shd/keycloak:dev" \
+  "$($KUBECTL -n identity get pod keycloak-0 -o jsonpath='{.spec.containers[0].image}')"
+
+# follow <jar> <url> [curl args]: follow every redirect with the session in <jar>; prints
+# "<status> <final URL>" and keeps the last body in $TMP/body.
+follow() {
+  local jar=$1 url=$2
+  shift 2
+  edge_curl -b "$jar" -c "$jar" -L -o "$TMP/body" -w '%{http_code} %{url_effective}' "$@" "$url"
+}
+login_page() { grep -q 'kc-form-login\|loginAction' "$TMP/body" && echo "login page" || echo "no login page"; }
+fetch_code() { code -b "$1" -c "$1" -H 'X-Requested-With: fetch' "$2"; }
+
+# Engineers: one login on Prometheus is also the status page's session; one logout ends both.
+jar=$TMP/ops.jar
+sso_login sre "$(edge_url prometheus.localtest.me /)" "$jar" || true
+expect "after the Prometheus login, the status page has data without a login" 200 "$(fetch_code "$jar" "$ME")"
+expect "status page Logout -> Keycloak end session -> landing page" "200 $HOME_URL" \
+  "$(follow "$jar" "$(edge_url status.localtest.me /oauth2/logout)")"
+expect "after logout: status page data" 401 "$(fetch_code "$jar" "$ME")"
+expect "after logout: Prometheus (same session, ended too)" "302 https://sso.localtest.me/realms/ops/" \
+  "$(edge_curl -b "$jar" -o /dev/null -w '%{http_code} %{redirect_url}' "$(edge_url prometheus.localtest.me /)" | cut -c1-40)"
+follow "$jar" "$(edge_url status.localtest.me /login)" >/dev/null || true
+expect "after logout: status page Login asks for the password again (Keycloak session ended)" "login page" "$(login_page)"
+
+# Keycloak session from Grafana's own login: the status page's Login completes without a password.
+jar=$TMP/grafana.jar
+sso_login dev "$(edge_url grafana.localtest.me /login/generic_oauth)" "$jar" || true
+expect "Keycloak session (Grafana): status page Login returns without a password" \
+  "200 $(edge_url status.localtest.me /) no login page" \
+  "$(follow "$jar" "$(edge_url status.localtest.me /login)") $(login_page)"
+expect "... and the page has data as dev" '200 "groups":["dev"]' \
+  "$(fetch_code "$jar" "$ME") $(edge_curl -b "$jar" -H 'X-Requested-With: fetch' "$ME" | grep -o '"groups":\[[^]]*\]')"
+expect "Grafana Sign out -> Keycloak end session -> landing page" "200 $HOME_URL" \
+  "$(follow "$jar" "$(edge_url grafana.localtest.me /logout)")"
+follow "$jar" "$(edge_url status.localtest.me /oauth2/logout)" >/dev/null || true
+follow "$jar" "$(edge_url status.localtest.me /login)" >/dev/null || true
+expect "after both logouts: status page Login asks for the password again" "login page" "$(login_page)"
+
+# Customers: branded login page, shop logout to the landing page.
+jar=$TMP/shop.jar
+follow "$jar" "$SHOP/" >/dev/null || true
+expect "shop without a session -> Keycloak login page of the customers realm, branded theme shd-shop" \
+  "login page shd-shop" "$(login_page) $(grep -o '/login/shd-shop/' "$TMP/body" | head -1 | sed 's#/login/##; s#/##')"
+follow "$jar" "$(edge_url prometheus.localtest.me /)" >/dev/null || true
+expect "ops realm keeps Keycloak's default login theme" "login page keycloak.v2" \
+  "$(login_page) $(grep -o '/login/keycloak\.v2/' "$TMP/body" | head -1 | sed 's#/login/##; s#/##')"
+REG="$(edge_url sso.localtest.me /realms/customers/protocol/openid-connect/registrations)?client_id=shop-gateway&response_type=code&scope=openid&redirect_uri=$(edge_url shop.localtest.me /oauth2/callback)"
+follow "$TMP/anon.jar" "$REG" >/dev/null || true
+expect "branded registration page" "register.ftl shd-shop" \
+  "$(grep -o 'register\.ftl' "$TMP/body" | head -1) $(grep -o '/login/shd-shop/' "$TMP/body" | head -1 | sed 's#/login/##; s#/##')"
+sso_login customer "$SHOP/" "$jar" || true
+expect "customer login on the branded page, then the shop's API" 200 "$(fetch_code "$jar" "$SHOP/api/me")"
+expect "shop Sign out -> Keycloak end session -> landing page" "200 $HOME_URL" \
+  "$(follow "$jar" "$(edge_url shop.localtest.me /oauth2/logout)")"
+expect "after logout: shop API" 401 "$(fetch_code "$jar" "$SHOP/api/me")"
+follow "$jar" "$SHOP/" >/dev/null || true
+expect "after logout: the shop asks for the password again" "login page" "$(login_page)"
 
 printf '\nverify-identity: %d passed, %d failed\n' "$pass" "$failed"
 ((failed == 0))

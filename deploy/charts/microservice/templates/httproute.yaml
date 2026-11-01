@@ -41,4 +41,18 @@ spec:
         - name: {{ .service }}
           port: {{ .port | default 80 }}
     {{- end }}
+    {{- range .Values.httpRoute.redirects }}
+    # {{ .pathPrefix }} -> 302 {{ .path }} (answered by the gateway, after its filters ran)
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .pathPrefix | quote }}
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: {{ .path | quote }}
+            statusCode: 302
+    {{- end }}
 {{- end }}

@@ -1,0 +1,30 @@
+{{- with .Values.postLogoutRedirect }}
+# Where Keycloak sends the browser after the gateway's logout path (RP-initiated logout).
+# Envoy's OAuth2 filter (v1.39) has post_logout_redirect_uri, but SecurityPolicy.oidc of Envoy
+# Gateway v1.9 does not expose it yet (oidc.postLogoutRedirect is on Envoy Gateway's main branch):
+# without it Envoy sends https://<host>/, the protected page itself, which would start a new login.
+# This patch sets the field on every OAuth2 per-route configuration of the listener (EG puts the
+# OIDC configuration on each route); remove it once Envoy Gateway's field is available.
+# https://gateway.envoyproxy.io/docs/tasks/extensibility/envoy-patch-policy/
+# https://www.envoyproxy.io/docs/envoy/v1.39.0/api-v3/extensions/filters/http/oauth2/v3/oauth.proto
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyPatchPolicy
+metadata:
+  name: post-logout-redirect
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: {{ .gateway.name }}
+  type: JSONPatch
+  jsonPatches:
+    - type: type.googleapis.com/envoy.config.route.v3.RouteConfiguration
+      # Route configuration of the HTTPS listener: <gateway namespace>/<gateway>/<listener>.
+      name: {{ $.Release.Namespace }}/{{ .gateway.name }}/{{ .gateway.sectionName }}
+      operation:
+        op: add
+        jsonPath: "$.virtual_hosts[*].routes[*].typed_per_filter_config['envoy.filters.http.oauth2'].config"
+        path: /post_logout_redirect_uri
+        value:
+          uri: {{ .uri | quote }}
+{{- end }}
