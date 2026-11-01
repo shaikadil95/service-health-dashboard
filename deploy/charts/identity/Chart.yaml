@@ -1,0 +1,10 @@
+apiVersion: v2
+name: identity
+description: >-
+  Identity provider for Phase 6: a Keycloak server managed by the Keycloak Operator (Keycloak CR),
+  its PostgreSQL StatefulSet, the realms "customers" and "ops" as KeycloakRealmImports, and the
+  route for sso.localtest.me. The operator and its CRDs are installed from the official manifests
+  (deploy/keycloak-operator).
+type: application
+version: 0.1.0
+appVersion: "26.8.1"
