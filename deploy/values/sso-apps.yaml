@@ -1,0 +1,35 @@
+# Edge authentication for the routes in "apps" (release sso-apps).
+oidc:
+  # Status page and Status API: every engineer of the ops realm (sre, dev, viewer).
+  - name: status-ui
+    routes: [status-web, status-api]
+    realm: ops
+    clientId: ops-gateway
+    clientSecret: ops-gateway-oidc
+    forwardAccessToken: true
+    jwt:
+      audiences: [ops-gateway]
+    # The page's fetch() calls get 401 instead of a cross-origin redirect when the session expired.
+    denyRedirectHeaders:
+      - name: X-Requested-With
+        value: fetch
+  # Customer shop: backend for frontend. Envoy runs the login and keeps the session; the shop's
+  # same-origin /api calls are forwarded to the services with the customer's access token.
+  - name: shop
+    routes: [shop-web]
+    realm: customers
+    clientId: shop-gateway
+    clientSecret: shop-gateway-oidc
+    forwardAccessToken: true
+    jwt:
+      audiences: [shop-api]
+    denyRedirectHeaders:
+      - name: X-Requested-With
+        value: fetch
+
+jwt:
+  # api.localtest.me: bearer tokens of the customers realm for the shop API.
+  - name: api
+    routes: [order, user]
+    realm: customers
+    audiences: [shop-api]

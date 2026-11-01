@@ -1,0 +1,9 @@
+apiVersion: v2
+name: sso
+description: >-
+  Authentication at the edge (Phase 6): Envoy Gateway SecurityPolicies (OIDC login with a
+  gateway-managed session, JWT validation, claim-based authorization) for the HTTPRoutes of one
+  namespace, and the connection from Envoy to Keycloak (Backend + BackendTLSPolicy with the local CA).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

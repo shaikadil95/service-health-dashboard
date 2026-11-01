@@ -2,7 +2,7 @@ gateway:
   parentRef:
     name: edge
     namespace: envoy-gateway-system
-    sectionName: http
+    sectionName: https
 
 # UIs behind the edge Gateway. Until Phase 6 adds SSO they have no authentication besides Grafana's
 # own login, and on Podman/macOS the gateway listens on all interfaces (deploy/README.md).

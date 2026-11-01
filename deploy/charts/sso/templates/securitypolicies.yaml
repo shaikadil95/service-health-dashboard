@@ -1,0 +1,80 @@
+{{- range .Values.oidc }}
+{{- $ctx := dict "root" $ "realm" .realm "audiences" (.jwt | default dict).audiences }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ .name }}
+spec:
+  targetRefs:
+    {{- include "sso.targetRefs" .routes | nindent 4 }}
+  oidc:
+    provider:
+      backendRefs:
+        {{- include "sso.backendRefs" $ctx | nindent 8 }}
+      backendSettings:
+        {{- include "sso.backendSettings" $ctx | nindent 8 }}
+      issuer: {{ include "sso.issuer" $ctx }}
+      # Explicit endpoints: the controller does not need to fetch the discovery document.
+      authorizationEndpoint: {{ include "sso.issuer" $ctx }}/protocol/openid-connect/auth
+      tokenEndpoint: {{ include "sso.issuer" $ctx }}/protocol/openid-connect/token
+      endSessionEndpoint: {{ include "sso.issuer" $ctx }}/protocol/openid-connect/logout
+    clientID: {{ .clientId }}
+    clientSecret:
+      name: {{ .clientSecret }}
+    scopes: [openid, profile, email]
+    # One policy serves several hosts: the callback is on the host the login started from.
+    redirectURL: "https://%REQ(:authority)%/oauth2/callback"
+    logoutPath: /oauth2/logout
+    forwardAccessToken: {{ .forwardAccessToken | default false }}
+    {{- with .cookieDomain }}
+    cookieDomain: {{ . }}
+    {{- end }}
+    {{- with .cookieNames }}
+    cookieNames:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .denyRedirectHeaders }}
+    denyRedirect:
+      headers:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+  {{- with .jwt }}
+  # The access token that the OIDC filter forwards (Authorization header) is validated again by the
+  # JWT filter, which makes its claims available for authorization.
+  jwt:
+    providers:
+      {{- include "sso.jwtProvider" $ctx | nindent 6 }}
+  {{- if .allowGroups }}
+  authorization:
+    defaultAction: Deny
+    rules:
+      - name: allow-groups
+        action: Allow
+        principal:
+          jwt:
+            provider: keycloak-{{ $ctx.realm }}
+            claims:
+              - name: groups
+                valueType: StringArray
+                values:
+                  {{- toYaml .allowGroups | nindent 18 }}
+  {{- end }}
+  {{- end }}
+{{- end }}
+{{- range .Values.jwt }}
+{{- $ctx := dict "root" $ "realm" .realm "audiences" .audiences }}
+---
+# Bearer-token APIs: requests without a valid token (signature, iss, aud, exp) get 401 at the edge
+# and never reach the services, which validate the token again themselves.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: {{ .name }}
+spec:
+  targetRefs:
+    {{- include "sso.targetRefs" .routes | nindent 4 }}
+  jwt:
+    providers:
+      {{- include "sso.jwtProvider" $ctx | nindent 6 }}
+{{- end }}

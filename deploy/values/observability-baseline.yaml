@@ -220,6 +220,18 @@ policies:
                 app.kubernetes.io/name: alertmanager
         ports:
           - { port: 9093, protocol: TCP }
+      # OAuth token and userinfo calls to https://sso.localtest.me (Keycloak behind the gateway; the
+      # Envoy proxy listens on 10443 for the Gateway's port 443).
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: envoy-gateway-system
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/component: proxy
+                gateway.envoyproxy.io/owning-gateway-name: edge
+        ports:
+          - { port: 10443, protocol: TCP }
       # Grafana installs its preinstalled app plugins (Logs, Metrics and Traces Drilldown) from
       # grafana.com at startup; no persistence, so on every start. HTTPS to public addresses only.
       - to:
@@ -250,9 +262,6 @@ policies:
           - namespaceSelector:
               matchLabels:
                 kubernetes.io/metadata.name: identity
-            podSelector:
-              matchLabels:
-                app: keycloak
         ports:
           - { port: 4317, protocol: TCP }
           - { port: 4318, protocol: TCP }

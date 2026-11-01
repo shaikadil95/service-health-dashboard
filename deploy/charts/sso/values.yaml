@@ -1,0 +1,17 @@
+# Keycloak as seen from Envoy: the public URL, reached through the gateway itself (CoreDNS rewrite),
+# over TLS that is verified with the mkcert CA (ConfigMap from deploy/scripts/mkcert-ca.sh).
+idp:
+  host: sso.localtest.me
+  caConfigMap: localtest-ca
+
+# OIDC login (authorization code flow) handled by Envoy: the browser holds only Envoy's encrypted,
+# HMAC-signed session cookies. Each entry:
+#   name, routes (HTTPRoute names in this namespace), realm, clientId, clientSecret (Secret with key
+#   client-secret), cookieDomain (optional, for SSO across subdomains), cookieNames (optional),
+#   forwardAccessToken, denyRedirectHeaders (requests that get 401 instead of a login redirect),
+#   jwt (optional: validate the forwarded access token: audiences, and allowGroups for
+#   authorization on the groups claim; without allowGroups every valid token is accepted).
+oidc: []
+
+# JWT validation only (APIs called with a bearer token). Each entry: name, routes, realm, audiences.
+jwt: []
