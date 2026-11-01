@@ -199,14 +199,14 @@ endef
 images: build ## Build the service and web images and load them into the kind cluster
 	$(call kind_load,$(SERVICE_IMAGES) $(WEB_IMAGES))
 
-# Image for the in-cluster checks of `make verify`. Pulled by the engine and loaded into kind, so
-# the check does not depend on registry access from inside the node.
+# Image for the in-cluster checks of `make verify`. Use the same Docker/Podman loader as the
+# platform images, including its fallback when kind cannot import an image archive.
 VERIFY_IMAGE := docker.io/curlimages/curl:8.23.0
 
 .PHONY: verify-image
 verify-image:
-	@$(ENGINE) image inspect $(VERIFY_IMAGE) >/dev/null 2>&1 || $(ENGINE) pull $(VERIFY_IMAGE)
-	$(call kind_load,$(VERIFY_IMAGE))
+	@printf '%s\n' '$(VERIFY_IMAGE)' | ENGINE=$(ENGINE) KIND=$(KIND) CLUSTER_NAME=$(CLUSTER_NAME) \
+	  CACHE_DIR=$(CACHE_DIR) deploy/scripts/preload-images.sh
 
 $(CACHE_DIR)/docker-config/config.json:
 	@mkdir -p $(@D) && echo '{}' > $@
@@ -265,16 +265,14 @@ status: ## Show nodes, gateway, routes and workloads
 grafana-password: ## Print the generated Grafana break-glass admin password (user: admin)
 	@$(KUBECTL_KIND) -n observability get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
 
-# A separate Chrome profile that resolves *.localtest.me to the gateway itself (for networks whose DNS
-# drops 127.0.0.1 answers) and accepts certificates chained to the mkcert CA without installing it
-# into a trust store (no admin rights). The flags only apply to this profile.
+# A separate Chrome profile resolves *.localtest.me to the gateway itself when the host DNS drops
+# 127.0.0.1 answers. Trust the mkcert CA in the login keychain before opening it.
 CHROME_APP ?= Google Chrome
+CHROME_PROFILE ?= $(HOME)/.shd-chrome-trusted
 .PHONY: browser
-browser: ## Open Chrome with *.localtest.me -> 127.0.0.1 and the mkcert CA accepted (separate profile)
-	@spki=$$(openssl x509 -in "$$(mkcert -CAROOT)/rootCA.pem" -pubkey -noout | openssl pkey -pubin -outform der \
-	  | openssl dgst -sha256 -binary | base64); \
-	open -na "$(CHROME_APP)" --args --user-data-dir="$$HOME/.shd-chrome" \
-	  --host-resolver-rules="MAP *.localtest.me 127.0.0.1" --ignore-certificate-errors-spki-list="$$spki" \
+browser: ## Open Chrome with *.localtest.me -> 127.0.0.1 (separate profile; trust the CA first)
+	@open -na "$(CHROME_APP)" --args --user-data-dir="$(CHROME_PROFILE)" \
+	  --host-resolver-rules="MAP *.localtest.me 127.0.0.1" \
 	  https://status.localtest.me https://shop.localtest.me
 
 .PHONY: sso-users

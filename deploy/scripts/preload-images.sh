@@ -46,9 +46,27 @@ mkdir -p "$CACHE_DIR"
 if [[ $ENGINE == podman ]]; then
   archive="$CACHE_DIR/platform-images.tar"
   trap 'rm -f "$archive"' EXIT
-  podman save -m -o "$archive" "${missing[@]}"
-  $KIND load image-archive "$archive" --name "$CLUSTER_NAME"
+  if podman save -m -o "$archive" "${missing[@]}" &&
+    $KIND load image-archive "$archive" --name "$CLUSTER_NAME"; then
+    loaded_by_kind=true
+  else
+    loaded_by_kind=false
+  fi
 else
-  $KIND load docker-image "${missing[@]}" --name "$CLUSTER_NAME"
+  if $KIND load docker-image "${missing[@]}" --name "$CLUSTER_NAME"; then
+    loaded_by_kind=true
+  else
+    loaded_by_kind=false
+  fi
+fi
+if [[ $loaded_by_kind == false ]]; then
+  # If kind's archive import fails, pull the same references in the node with either engine.
+  # inspecti skips images that a partial import already loaded.
+  echo "kind image import failed; pulling missing images into $NODE with crictl"
+  export ENGINE NODE
+  printf '%s\n' "${missing[@]}" | xargs -P "$PARALLEL" -I{} sh -c '
+    $ENGINE exec "$NODE" crictl inspecti "$1" >/dev/null 2>&1 ||
+      $ENGINE exec "$NODE" crictl pull "$1" >/dev/null
+  ' sh '{}'
 fi
 echo "platform images: loaded ${#missing[@]} into $NODE"

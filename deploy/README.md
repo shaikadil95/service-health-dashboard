@@ -20,7 +20,7 @@ make grafana-password   # Grafana break-glass admin (user admin)
 make down     # delete the cluster
 ```
 
-Every URL is HTTPS with the mkcert CA (trust it once with `mkcert -install`, or `make browser`). The API needs a bearer token,
+Every URL is HTTPS with the mkcert CA (trust it once with `mkcert -install`). The API needs a bearer token,
 see the [README](../README.md#getting-started) for a client-credentials example.
 
 If `*.localtest.me` does not resolve on your machine, see [DNS blocked on your network](#dns-blocked-on-your-network).
@@ -98,7 +98,7 @@ namespace baseline and the services; the Prometheus Operator CRDs before everyth
 | `make up` / `make down` | `cluster-up images platform-images deploy status` / `cluster-down` |
 | `make grafana-password` | Prints the generated Grafana break-glass admin password (user `admin`) |
 | `make sso-users` | Prints the demo logins of the `ops` and `customers` realms and the Keycloak admin |
-| `make browser` | Opens Chrome with a separate profile that maps `*.localtest.me` to 127.0.0.1 and accepts the mkcert CA (no trust store change, no admin rights) |
+| `make browser` | Opens Chrome with a separate profile that maps `*.localtest.me` to 127.0.0.1 (trust the mkcert CA first) |
 | `make load-start` / `load-stop` | Scale the k6 load generator to 1 / 0 replicas |
 | `make redeploy` | Rebuild and reload the images, then `rollout restart` the services (the tag stays `dev`) |
 | `make status` | Nodes, Gateway and HTTPRoutes, Envoy Service, workloads and NetworkPolicies |
@@ -486,8 +486,8 @@ namespace with clients (`apps`, `observability`, `loadgen`, `identity`, `envoy-g
 `cert-manager`, CRDs as templates with `crds.keep`) issues the `*.localtest.me` ECDSA certificate (90 days, renewed after 60) for
 the Gateway's new HTTPS listener (443 → NodePort 30443). The HTTP listener accepts only the `https-redirect` route of the edge
 chart: 301 to HTTPS for the browser hosts, 404 for `api.localtest.me` (no redirect for clients that may send a token).
-**Trust the CA once** with `mkcert -install` (it may ask for your password), or use `make browser`, which accepts certificates
-chained to the CA in a separate Chrome profile (`--ignore-certificate-errors-spki-list` with the CA key's hash).
+**Trust the CA once** with `mkcert -install` (it may ask for your password). On macOS, you can trust it for your user
+without admin rights using `security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$(mkcert -CAROOT)/rootCA.pem"`.
 
 **Keycloak.** [`scripts/keycloak-operator.sh`](scripts/keycloak-operator.sh) applies the official Keycloak Operator 26.8.1
 manifests, pinned and patched with kubectl's built-in kustomize ([`keycloak-operator/`](keycloak-operator)): namespace `identity`
@@ -584,13 +584,13 @@ as DNS-rebinding protection; check with `dig +short shop.localtest.me` (empty) v
 
 - **Scripts:** `make verify`, `make demo` and [`scripts/oidc-login.py`](scripts/oidc-login.py) do not use the host resolver
   (`curl --resolve`, a pinned resolver in Python, `kubectl port-forward`).
-- **Browser without admin rights:** a separate Chrome profile with its own host mapping, which also accepts the mkcert CA:
+- **Browser without admin rights:** after trusting the CA in your login keychain, use a separate Chrome profile with its own host mapping:
 
   ```bash
   make browser
   # equivalent to (Chrome or Edge):
-  open -na "Google Chrome" --args --user-data-dir="$HOME/.shd-chrome" \
-    --host-resolver-rules="MAP *.localtest.me 127.0.0.1"   # plus --ignore-certificate-errors-spki-list=<CA key hash>
+  open -na "Google Chrome" --args --user-data-dir="$HOME/.shd-chrome-trusted" \
+    --host-resolver-rules="MAP *.localtest.me 127.0.0.1"
   ```
 
   `make browser CHROME_APP="Microsoft Edge"` uses Edge. The flags only apply to that profile.
