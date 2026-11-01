@@ -113,7 +113,7 @@ The [architecture document](docs/architecture.md) explains each flow.
 ## Local URLs
 
 All hosts use **HTTPS** with a certificate from a local [mkcert](https://github.com/FiloSottile/mkcert) CA (`make up` creates it if needed).
-Trust it once with `mkcert -install`, or use `make browser` (a separate Chrome profile that accepts the gateway's certificate without installing anything).
+Trust it once with `mkcert -install`. If your DNS blocks `*.localtest.me`, use `make browser` after trusting the CA.
 `*.localtest.me` resolves to `127.0.0.1` through public DNS; if your resolver filters that answer, see
 [deploy/README.md](deploy/README.md#dns-blocked-on-your-network). Demo logins: `make sso-users`.
 
@@ -150,7 +150,7 @@ PostgreSQL, the three services, the Status API, the status page and the shop, an
 make prereqs        # container engine (Podman must be rootful), kind, kubectl, helm 4, helmfile, helm-diff, mkcert
 make up             # kind cluster + images + local CA + Keycloak Operator + helmfile apply + CoreDNS rewrite (first run: ~15-20 min)
 make sso-users      # demo logins (generated per cluster)
-make browser        # optional: Chrome profile with *.localtest.me -> 127.0.0.1 and the gateway certificate accepted
+make browser        # optional: Chrome profile with *.localtest.me -> 127.0.0.1 (trust the CA first)
 open https://shop.localtest.me      # sign in as "customer", place an order
 open https://status.localtest.me    # sign in as "sre": one login for status, Prometheus, Alertmanager and Mailpit
 make verify         # automated checks of every phase (platform, telemetry, dashboards, alerting, identity)

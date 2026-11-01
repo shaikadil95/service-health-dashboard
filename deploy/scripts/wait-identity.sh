@@ -3,7 +3,6 @@
 # `make up && make verify` does not race the first start of Keycloak.
 #   - Keycloak Ready and both realm imports done;
 #   - each realm's JWKS is served through the gateway at its public URL, from inside the cluster
-XX
 #     namespace is not possible (no curl there), so from the host with the addresses pinned.
 set -euo pipefail
 
