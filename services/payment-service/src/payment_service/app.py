@@ -8,16 +8,29 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from shd_telemetry import FaultInjector, Telemetry, create_service_app
+from shd_telemetry import (
+    AuthSettings,
+    FaultInjector,
+    Principal,
+    Telemetry,
+    audit_user,
+    authorize,
+    create_service_app,
+    current_principal,
+)
 
 from . import __version__
 from .metrics import PaymentMetrics
 
 logger = logging.getLogger("payment_service")
+
+# Client role of the payment-service client in Keycloak's customers realm. Only the order service's
+# service account holds it, so only Order can charge payments.
+PAYMENTS_WRITE = ("payment-service", "payments:write")
 
 # Allow-list: currency is a metric attribute, so free-form codes would let clients create
 # unbounded time series.
@@ -50,9 +63,16 @@ def create_app(
     telemetry: Telemetry,
     faults: FaultInjector | None = None,
     approval_limit: Decimal | None = None,
+    auth: AuthSettings | None = None,
+    jwks_transport=None,
 ) -> FastAPI:
     app = create_service_app(
-        title="Payment service", version=__version__, telemetry=telemetry, faults=faults
+        title="Payment service",
+        version=__version__,
+        telemetry=telemetry,
+        faults=faults,
+        auth=auth,
+        jwks_transport=jwks_transport,
     )
     limit = approval_limit or Decimal(os.environ.get("PAYMENT_APPROVAL_LIMIT", "5000"))
     metrics = PaymentMetrics(telemetry.meter_provider)
@@ -76,8 +96,16 @@ def create_app(
     )
     async def create_payment(
         request: PaymentRequest,
+        http_request: Request,
+        principal: Annotated[Principal, Depends(current_principal)],
         idempotency_key: Annotated[str | None, Header(min_length=1, max_length=255)] = None,
     ) -> JSONResponse:
+        authorize(
+            http_request,
+            principal,
+            principal.has_client_role(*PAYMENTS_WRITE),
+            "the payments:write role of payment-service is required",
+        )
         if idempotency_key is None:
             # draft-ietf-httpapi-idempotency-key-header: missing required key -> 400.
             raise HTTPException(400, "Idempotency-Key header is required")
@@ -108,6 +136,8 @@ def create_app(
                 "payment.id": payment.id,
                 "order.id": request.order_id,
                 "payment.status": payment.status,
+                "oauth.client_id": principal.client_id,
+                "enduser.id": audit_user(http_request, principal),
             },
         )
         return _respond(payment, replayed=False)

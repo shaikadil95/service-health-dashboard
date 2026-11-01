@@ -44,6 +44,16 @@ spec:
               value: {{ .Values.rate | quote }}
             - name: DURATION
               value: {{ .Values.duration | quote }}
+            - name: TOKEN_URL
+              value: {{ .Values.tokenUrl | quote }}
+            - name: CLIENT_ID
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.clientSecret }}, key: client-id }
+            - name: CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.clientSecret }}, key: client-secret }
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/localtest/ca.crt
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
@@ -57,7 +67,13 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            - name: localtest-ca
+              mountPath: /etc/ssl/localtest
+              readOnly: true
       volumes:
+        - name: localtest-ca
+          configMap:
+            name: {{ .Values.caConfigMap }}
         - name: script
           configMap:
             name: {{ .Release.Name }}-script

@@ -1,12 +1,13 @@
 [project]
 name = "shd-telemetry"
 version = "0.1.0"
-description = "Shared OpenTelemetry setup, JSON logging, health probes and fault injection for the demo services."
+description = "Shared OpenTelemetry setup, JSON logging, health probes, fault injection and OAuth/JWT auth for the demo services."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.120",
     "uvicorn>=0.38",
     "httpx>=0.28",
+    "pyjwt[crypto]>=2.15",
     "opentelemetry-api~=1.45",
     "opentelemetry-sdk~=1.45",
     "opentelemetry-exporter-otlp-proto-grpc~=1.45",

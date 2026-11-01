@@ -25,4 +25,20 @@ spec:
       backendRefs:
         - name: {{ include "microservice.name" . }}
           port: {{ .Values.service.port }}
+    {{- range .Values.httpRoute.extraRules }}
+    # {{ .pathPrefix }} -> {{ .service }} {{ .replacePrefix }} (same origin, longer prefix wins)
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ .pathPrefix | quote }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: {{ .replacePrefix | quote }}
+      backendRefs:
+        - name: {{ .service }}
+          port: {{ .port | default 80 }}
+    {{- end }}
 {{- end }}

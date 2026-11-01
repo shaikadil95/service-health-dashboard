@@ -2,6 +2,12 @@
 image:
   repository: localhost/shd/user-service
 
+# Customer tokens (shop-api: own profile only) and service tokens with the users:read client role
+# (audience user-service, e.g. order's client credentials).
+auth:
+  enabled: true
+  audiences: [shop-api, user-service]
+
 networkPolicy:
   ingressFrom:
     # Envoy data-plane pods of the edge Gateway.

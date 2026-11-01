@@ -36,6 +36,20 @@ spec:
     {{- with .Values.networkPolicy.egress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+    {{- if .Values.auth.enabled }}
+    {{- with .Values.auth.gatewayEgress }}
+    # JWKS and token endpoint of Keycloak at https://sso.localtest.me (through the gateway).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .namespace }}
+          podSelector:
+            {{- toYaml .podSelector | nindent 12 }}
+      ports:
+        - port: {{ .port }}
+          protocol: TCP
+    {{- end }}
+    {{- end }}
     {{- with .Values.networkPolicy.otelCollector }}
     {{- if .enabled }}
     - to:

@@ -31,7 +31,7 @@ class Settings:
     # Sparklines: last 30 minutes, one point per minute.
     series_minutes: int = 30
     series_step_seconds: int = 60
-    grafana_url: str = "http://grafana.localtest.me"
+    grafana_url: str = "https://grafana.localtest.me"
 
     def __post_init__(self) -> None:
         for name in (*self.services, self.namespace):
