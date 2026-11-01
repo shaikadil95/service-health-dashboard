@@ -1,0 +1,45 @@
+%% Phase 6b: landing page, login from the landing page, shared engineers' session, logout back to the landing page
+sequenceDiagram
+  autonumber
+  actor U as Browser
+  participant Home as home.localtest.me (public)
+  participant GW as Envoy Gateway (OIDC filter)
+  participant KC as Keycloak (sso.localtest.me)
+  participant App as Status page / shop
+
+  rect rgb(240, 255, 240)
+    Note over U,App: Customer: "Customer login" on the landing page
+    U->>Home: GET / (no login)
+    U->>GW: GET https://shop.localtest.me/ (full-page link)
+    GW-->>U: 302 to Keycloak, realm customers (no shop session)
+    U->>KC: branded login page (Keycloakify theme shd-shop), sign in or register
+    KC-->>U: 302 /oauth2/callback?code=...
+    U->>GW: callback
+    GW->>KC: code -> tokens
+    GW-->>U: shop session cookies (host shop.localtest.me), 302 to /
+    U->>App: shop with the gateway session (no token in JavaScript)
+  end
+
+  rect rgb(235, 245, 255)
+    Note over U,App: Engineer: the status page shell is public, its /api needs the session
+    U->>GW: GET https://status.localtest.me/ (public files)
+    U->>GW: fetch /api/v1/me (X-Requested-With: fetch)
+    alt session cookies on .localtest.me (e.g. after Prometheus)
+      GW->>App: forward + access token -> data, "Signed in as ..."
+    else no session
+      GW-->>U: 401 -> page shows "Login"
+      U->>GW: GET /login (full page)
+      GW-->>U: 302 to Keycloak, realm ops (default theme)
+      U->>KC: password, or none if Keycloak already has a session (Grafana)
+      KC-->>U: 302 /oauth2/callback -> session cookies on .localtest.me -> 302 /login -> 302 /
+    end
+  end
+
+  rect rgb(255, 245, 235)
+    Note over U,KC: Logout (status page, landing page or shop)
+    U->>GW: GET /oauth2/logout
+    GW-->>U: delete session cookies, 302 to end_session_endpoint<br/>id_token_hint, client_id, post_logout_redirect_uri=https://home.localtest.me/
+    U->>KC: RP-initiated logout (Keycloak session ended)
+    KC-->>U: 302 https://home.localtest.me/ (registered post-logout URI)
+    U->>Home: landing page, the next protected page asks for the password again
+  end
