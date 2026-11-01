@@ -30,6 +30,16 @@ keycloak:
     endpoint: http://otel-collector.observability.svc.cluster.local:4317
     samplerRatio: 1
 
+# The import Job runs its own Keycloak (measured peak working set ~570 MiB); without explicit values it
+# requests the operator's default of 1700 Mi.
+realmImport:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+
 postgres:
   image:
     repository: docker.io/library/postgres

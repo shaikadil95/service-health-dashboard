@@ -11,6 +11,9 @@ metadata:
   name: realm-{{ $realm }}
 spec:
   keycloakCRName: keycloak
+  # Sizing of the import Job (values.yaml, realmImport).
+  resources:
+    {{- toYaml $.Values.realmImport.resources | nindent 4 }}
   placeholders:
     {{- range $key := list "OPS_GATEWAY_SECRET" "GRAFANA_SECRET" "SHOP_GATEWAY_SECRET" "ORDER_SERVICE_SECRET" "LOADGEN_SECRET" "CUSTOMER_PASSWORD" "SRE_PASSWORD" "DEV_PASSWORD" "VIEWER_PASSWORD" }}
     {{ $key }}:
