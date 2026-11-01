@@ -2,7 +2,7 @@ gateway:
   parentRef:
     name: edge
     namespace: envoy-gateway-system
-    sectionName: http
+    sectionName: https
 
 # UIs behind the edge Gateway. Until Phase 6 adds SSO they have no authentication besides Grafana's
 # own login, and on Podman/macOS the gateway listens on all interfaces (deploy/README.md).
@@ -24,6 +24,13 @@ routes:
     service: kps-alertmanager
     port: 9093
     blockedPathPrefixes: [/-/reload, /-/quit]
+  # Mailpit (charts/alerting): the on-call inbox. Its send API would let anyone inject fake alert
+  # emails, so it stays cluster-internal.
+  - name: mailpit
+    hostname: mail.localtest.me
+    service: mailpit
+    port: 8025
+    blockedPathPrefixes: [/api/v1/send]
 
 # Blackbox HTTP probes of each service's /readyz through its in-cluster Service URL.
 probes:

@@ -6,6 +6,14 @@ env:
   USER_SERVICE_URL: http://user
   PAYMENT_SERVICE_URL: http://payment
 
+# Customer tokens (audience shop-api) from api.localtest.me and the shop; orders:read/orders:write.
+# Calls to user and payment use order's own client credentials token.
+auth:
+  enabled: true
+  audiences: [shop-api]
+  clientCredentials:
+    secretName: order-service-client
+
 networkPolicy:
   ingressFrom:
     - namespaceSelector:

@@ -1,27 +1,29 @@
-# Local Kubernetes platform (Phases 2–4)
+# Local Kubernetes platform (Phases 2–6)
 
 One command creates a single-node [kind](https://kind.sigs.k8s.io/) cluster on Docker or Podman, installs
 [Envoy Gateway](https://gateway.envoyproxy.io/) as the edge, deploys the User, Order and Payment services with
 probes, hardened pods and default-deny NetworkPolicies (Phase 2), and the telemetry pipeline and storage: OpenTelemetry
 Collector, Prometheus, Alertmanager, Grafana, Loki, Tempo, a blackbox exporter and a k6 load generator (Phase 3,
 [details](#telemetry-pipeline-and-storage-phase-3)), then Grafana's linked signals and two dashboards, the Status API and the
-status page on http://status.localtest.me (Phase 4, [details](#visualization-and-status-page-phase-4)).
+status page on https://status.localtest.me (Phase 4, [details](#visualization-and-status-page-phase-4)), and alerting:
+promtool-tested rules, Alertmanager routing and inhibition, email to Mailpit on https://mail.localtest.me, runbooks and a
+default-deny NetworkPolicy for `observability` (Phase 5, [details](#alerting-and-notification-phase-5)), then HTTPS with a local CA,
+Keycloak single sign-on for every UI, JWT-protected APIs, client credentials between services and a customer shop
+(Phase 6, [details](#identity-and-single-sign-on-phase-6)).
 
 ```bash
-make up       # prereqs -> kind cluster -> images (services + stack) -> helmfile apply -> CoreDNS rewrite -> status
-make verify   # automated checks: gateway, NetworkPolicy, readiness (2); metrics, logs, traces, UIs (3); dashboards, links, status page (4)
-make grafana-password   # http://grafana.localtest.me, user admin
+make up       # prereqs -> kind cluster -> images (services + stack) -> CA, secrets, Keycloak Operator, CoreDNS rewrite -> helmfile apply -> wait for SSO -> status
+make verify   # automated checks: gateway, NetworkPolicy, readiness (2); metrics, logs, traces, UIs (3); dashboards, links, status page (4); rules, Alertmanager, Mailpit (5); TLS, SSO, API auth, shop (6)
+make demo     # failure scenarios: alert -> email in Mailpit -> status page -> recovery (5, 6)
+make sso-users          # demo logins of the Keycloak realms (generated per cluster)
+make grafana-password   # Grafana break-glass admin (user admin)
 make down     # delete the cluster
 ```
 
-```bash
-curl -s -X POST http://api.localtest.me/orders -H 'content-type: application/json' \
-  -d '{"user_id":"u-1001","items":[{"sku":"book","quantity":2,"unit_price":"12.50"}],"currency":"EUR"}'
-curl -s http://api.localtest.me/orders/<id>
-curl -s http://api.localtest.me/users/u-1001
-```
+Every URL is HTTPS with the mkcert CA (trust it once with `mkcert -install`, or `make browser`). The API needs a bearer token,
+see the [README](../README.md#getting-started) for a client-credentials example.
 
-If `api.localtest.me` does not resolve on your machine, see [Troubleshooting](#troubleshooting).
+If `*.localtest.me` does not resolve on your machine, see [DNS blocked on your network](#dns-blocked-on-your-network).
 
 ## Architecture
 
@@ -51,6 +53,10 @@ flowchart LR
 | Namespaces | [`scripts/namespaces.sh`](scripts/namespaces.sh) | Creates `apps` and `envoy-gateway-system` with Pod Security Admission `restricted` (enforce, warn, audit) |
 | CoreDNS | [`scripts/coredns-localtest.sh`](scripts/coredns-localtest.sh) | `*.localtest.me` → `envoy-edge.envoy-gateway-system.svc.cluster.local` inside the cluster |
 | Observability (Phase 3) | releases in namespace `observability`, see [Telemetry pipeline and storage](#telemetry-pipeline-and-storage-phase-3) | Prometheus Operator CRDs, kube-prometheus-stack, Loki, Tempo, OTel Collector, blackbox exporter, `observability-config` (UI routes, Probes, Envoy PodMonitor) |
+| Alerting (Phase 5) | releases `alerting`, `observability-baseline`, see [Alerting](#alerting-and-notification-phase-5) | Alert and recording rules, Alertmanager configuration, Mailpit; default-deny NetworkPolicies for `observability` |
+| TLS (Phase 6) | release `cert-manager`, `charts/edge` ([`tls.yaml`](charts/edge/templates/tls.yaml)), [`scripts/mkcert-ca.sh`](scripts/mkcert-ca.sh) | mkcert CA → `ClusterIssuer` → `*.localtest.me` certificate of the HTTPS listener; HTTP → HTTPS redirect |
+| Identity (Phase 6) | Keycloak Operator ([`keycloak-operator`](keycloak-operator)), releases `identity-baseline`, `identity` ([`charts/identity`](charts/identity)) | Keycloak, PostgreSQL, realms `customers` and `ops`, NetworkPolicies of `identity` |
+| Edge auth and shop (Phase 6) | releases `sso-apps`, `sso-observability` ([`charts/sso`](charts/sso)), `shop-web` | Envoy Gateway `SecurityPolicy`s (OIDC, JWT, authorization), the customer shop |
 | Load generator (Phase 3) | release `loadgen` in namespace `loadgen`, [`../loadgen`](../loadgen) | k6 Deployment with steady order traffic through the gateway |
 | Status (Phase 4) | releases `status-api`, `status-web` in `apps`, [`charts/microservice`](charts/microservice) + [`values/status-*.yaml`](values) | Status API ([`../services/status-api`](../services/status-api)) on `/api` and the static status page ([`../web`](../web)) on `/` of `status.localtest.me` |
 
@@ -73,6 +79,11 @@ namespace baseline and the services; the Prometheus Operator CRDs before everyth
 | Tempo | chart `grafana-community/tempo` 3.2.1 (Tempo 3.1.1) | [Tempo's Helm docs](https://grafana.com/docs/tempo/latest/set-up-for-tracing/setup-tempo/deploy/kubernetes/helm-chart/): `tempo` chart for monolithic mode; Tempo 3 runs monolithic without Kafka |
 | OpenTelemetry Collector | chart 0.178.1, image `opentelemetry-collector-contrib` 0.164.0 | Same Collector version as `compose.yaml` |
 | Blackbox exporter | chart 11.20.2 (v0.29.1) | |
+| Mailpit | `axllent/mailpit` v1.33.0 | Latest release |
+| cert-manager | chart and app v1.21.3 (`oci://quay.io/jetstack/charts/cert-manager`, CRDs as templates with `crds.keep`) | [Helm install docs](https://cert-manager.io/docs/installation/helm/) |
+| Keycloak / Keycloak Operator | 26.8.1 (official manifests of `keycloak/keycloak-k8s-resources`, CRD API `k8s.keycloak.org/v2beta1`) | [Operator installation](https://www.keycloak.org/operator/installation) |
+| PostgreSQL | `postgres:18.6-alpine` | Supported by Keycloak 26 |
+| mkcert | ≥ 1.4 (host) | `make prereqs` checks it |
 | k6 | `grafana/k6:2.3.0` | Same version as the host `k6` |
 
 ## Make targets
@@ -83,14 +94,18 @@ namespace baseline and the services; the Prometheus Operator CRDs before everyth
 | `make cluster-up` / `cluster-down` | Create (idempotent) or delete the kind cluster |
 | `make images` | `make build` (the four Python images and the `status-web` image from [`../web/Dockerfile`](../web/Dockerfile)), then load them into kind. Docker: `kind load docker-image`. Podman: `podman save -m` to one archive → `kind load image-archive` |
 | `make platform-images` | Renders the releases (`helmfile template`), pulls the third-party images that are not on the node yet with the engine (4 in parallel) and loads them into kind ([`scripts/preload-images.sh`](scripts/preload-images.sh)) |
-| `make deploy` | Namespaces with PSA labels → Grafana admin Secret (once) → `helmfile apply` → wait for `Gateway` `Programmed` → CoreDNS rewrite. Idempotent |
+| `make deploy` | Namespaces with PSA labels → Grafana admin Secret (once) → mkcert CA into the cluster → identity secrets (once) → Keycloak Operator and CRDs → CoreDNS rewrite → `helmfile apply` → wait for `Gateway` `Programmed` → wait until Keycloak serves both realms through the gateway ([`scripts/wait-identity.sh`](scripts/wait-identity.sh)). Idempotent |
 | `make up` / `make down` | `cluster-up images platform-images deploy status` / `cluster-down` |
-| `make grafana-password` | Prints the generated Grafana admin password (user `admin`) |
+| `make grafana-password` | Prints the generated Grafana break-glass admin password (user `admin`) |
+| `make sso-users` | Prints the demo logins of the `ops` and `customers` realms and the Keycloak admin |
+| `make browser` | Opens Chrome with a separate profile that maps `*.localtest.me` to 127.0.0.1 and accepts the mkcert CA (no trust store change, no admin rights) |
 | `make load-start` / `load-stop` | Scale the k6 load generator to 1 / 0 replicas |
 | `make redeploy` | Rebuild and reload the images, then `rollout restart` the services (the tag stays `dev`) |
 | `make status` | Nodes, Gateway and HTTPRoutes, Envoy Service, workloads and NetworkPolicies |
 | `make verify` | Loads the `curl` test image into kind, then runs [`scripts/verify.sh`](scripts/verify.sh), [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh) and [`scripts/verify-status.sh`](scripts/verify-status.sh), see [Verification](#verification) |
 | `make web-check` / `web-dev` | Web monorepo: Prettier, ESLint, typecheck, Vitest, build / Vite dev server (needs Node and pnpm, see [`../web`](../web/README.md)) |
+| `make rules-lint` / `rules-test` | `promtool check rules`, `amtool check-config` / promtool unit tests and Alertmanager routing and template tests (part of `make lint` / `make test`) |
+| `make demo` / `demo-reset` | The four failure scenarios with recovery ([`../scripts/demo.sh`](../scripts/demo.sh)) / reset all faults |
 | `make lint-charts` | `helm lint --strict` and `helm template` for the local charts (edge, namespace-baseline, observability-config, loadgen, microservice with every values file, including `status-api` and `status-web`) |
 
 The engine is detected as in Phase 1 (Podman if it is running, otherwise Docker; `make ENGINE=docker …` forces one).
@@ -101,10 +116,10 @@ With Podman the Makefile exports `KIND_EXPERIMENTAL_PROVIDER=podman`. Every `kub
 
 **Envoy proxy Service.** Envoy Gateway creates the proxy Deployment and Service per `Gateway`. The `EnvoyProxy`
 resource (referenced by the `GatewayClass`) sets the Service type to `NodePort`, gives it the stable name `envoy-edge`
-(`envoyService.name`) and pins `nodePort: 30080` for port 80 with a strategic-merge `patch`, because the API has no
-`nodePort` field. The HTTPS listener (443 → 30443) is added in Phase 6; patching a port that does not exist yet would
-create a broken Service port. The Envoy container listens on 10080 (Envoy Gateway shifts privileged ports because the
-proxy runs as non-root).
+(`envoyService.name`) and pins `nodePort: 30080` for port 80 and `30443` for 443 with a strategic-merge `patch`, because
+the API has no `nodePort` field (only ports of existing listeners may be patched; a missing one would create a broken
+Service port). The Envoy container listens on 10080 and 10443 (Envoy Gateway shifts privileged ports because the proxy runs
+as non-root). Since Phase 6 the HTTP listener only redirects to HTTPS, see [Identity](#identity-and-single-sign-on-phase-6).
 
 **What is exposed on `api.localtest.me`:**
 
@@ -244,13 +259,13 @@ file path, and Envoy spans by the connection's source IP, then adds pod metadata
 | Component | Configuration ([`values/`](values)) | Reached at |
 |---|---|---|
 | Prometheus | `enableOTLPReceiver`; promotes only `service.name`, `k8s.namespace.name`, `k8s.pod.name` to labels (`job`/`instance` come from `service.name`/`service.instance.id`, the rest stays on `target_info`); translation `UnderscoreEscapingWithSuffixes` (→ `http_server_request_duration_seconds_*`); `enableRemoteWriteReceiver`; `exemplar-storage` (100k); `outOfOrderTimeWindow: 30m`; selects every `ServiceMonitor`/`PodMonitor`/`Probe`/`PrometheusRule` in the cluster | http://prometheus.localtest.me |
-| Alertmanager | Chart default configuration (all alerts to the `null` receiver); routing and Mailpit arrive in Phase 5 | http://alertmanager.localtest.me |
-| Grafana | Admin password from the Secret `grafana-admin` that `make deploy` generates once per cluster ([`scripts/grafana-admin-secret.sh`](scripts/grafana-admin-secret.sh)), anonymous access and sign-up off, no PVC, datasources Prometheus (`uid: prometheus`), Loki (`loki`), Tempo (`tempo`), Alertmanager. Correlations and the two dashboards come in Phase 4; the chart's ~25 default dashboards are not installed | http://grafana.localtest.me |
+| Alertmanager | Configuration from the Secret `alertmanager-shd` (release `alerting`): routing by severity, inhibition, email to Mailpit, see [Alerting](#alerting-and-notification-phase-5) | https://alertmanager.localtest.me |
+| Grafana | Admin password from the Secret `grafana-admin` that `make deploy` generates once per cluster ([`scripts/grafana-admin-secret.sh`](scripts/grafana-admin-secret.sh)), anonymous access and sign-up off, no PVC, datasources Prometheus (`uid: prometheus`), Loki (`loki`), Tempo (`tempo`), Alertmanager. Correlations and the two dashboards come in Phase 4; the chart's ~25 default dashboards are not installed | https://grafana.localtest.me |
 | Loki | Monolithic, filesystem, `retention_period: 24h` (compactor), `allow_structured_metadata`; index labels only `service.name`, `service.namespace`, `k8s.namespace.name`, `k8s.container.name`, `deployment.environment.name` (Loki's default list would also index `k8s.pod.name` and `service.instance.id`); gateway, memcached caches, canary, ruler and Helm test pod off | in-cluster `loki:3100` |
 | Tempo | Monolithic (Tempo 3: no Kafka), local backend, 24 h block retention, OTLP receivers; metrics-generator with `service-graphs` and `span-metrics`, remote write with exemplars | in-cluster `tempo:3200` (query), `:4317` (OTLP) |
 | Blackbox exporter | Module `http_2xx` without redirects; one `Probe` per service on `http://<svc>.apps.svc.cluster.local/readyz` every 15 s (label `service`) | in-cluster `blackbox-exporter:9115` |
 | Envoy gateway | `EnvoyProxy.spec.telemetry`: OpenTelemetry tracing (100 % sampling, `service.name=gateway`, W3C `traceparent`) to the Collector, Prometheus stats on port 19001 scraped by a `PodMonitor` | — |
-| k6 | [`../loadgen`](../loadgen): `constant-arrival-rate`, 2 iterations/s (POST order, GET order, 30 % GET user ≈ 4.6 requests/s at the edge) for users u-1001…u-1003 against `http://api.localtest.me` | `make load-stop` / `load-start` |
+| k6 | [`../loadgen`](../loadgen): `constant-arrival-rate`, 2 iterations/s (POST order, GET order, 30 % GET user ≈ 4.6 requests/s at the edge) for users u-1001…u-1003 against `https://api.localtest.me` | `make load-stop` / `load-start` |
 
 The UI routes ([`charts/observability-config`](charts/observability-config)) send everything to the backend except
 Prometheus' `/api/v1/write`, `/api/v1/otlp`, `/-/reload`, `/-/quit` and Alertmanager's `/-/reload`, `/-/quit`, which an
@@ -260,14 +275,14 @@ UIs have no login besides Grafana's own (see the 0.0.0.0 note in [Troubleshootin
 
 Not scraped on kind, so they do not show up as down targets: etcd, kube-controller-manager, kube-scheduler (they bind
 their metrics to 127.0.0.1 in kind) and kube-proxy (`metricsBindAddress` 127.0.0.1:10249); their default rules are off
-too. The other default kube-prometheus-stack rules are loaded; Phase 5 adds the project's alerts and routing.
+too. The other default kube-prometheus-stack rules are loaded (except the `general` group, which the project's own
+`Watchdog` and `TelemetryPipelineDown` replace) and routed by severity like the project's alerts.
 
 **Pod Security.** `observability` enforces `privileged`: the Collector reads `/var/log/pods` and writes offsets through
 hostPath volumes, node-exporter uses the host network and PID namespaces. All other pods there set restricted-style
 security contexts (non-root, no privilege escalation, dropped capabilities, read-only root filesystem where the image
 allows it). The Collector runs as root without capabilities, because the pod log files are root-owned with mode 0640.
-`loadgen` enforces `restricted`. `observability` has no default-deny NetworkPolicy yet: its components talk to the API
-server and the node (kubelet, node-exporter) on host IPs, which kindnet only matches with `ipBlock`s; see Deviations.
+`loadgen` enforces `restricted`. NetworkPolicies of `observability`: see [Alerting](#networkpolicies-observability).
 
 ### Storage
 
@@ -302,20 +317,6 @@ Largest consumers in `observability`: Grafana 440 MiB (incl. two sidecars), Prom
 Collector 70–220 MiB, Tempo 154 MiB, Loki 91 MiB. The node reported 3.3 GiB of 9.7 GiB in use; CPU stayed below
 0.25 cores in total. `metrics-server` is not installed, so `kubectl top` is not available; Prometheus covers it.
 
-### Deviations from the plan
-
-- **Charts.** Loki and Tempo come from `grafana-community` (where Grafana's documentation now points), not from
-  `grafana/helm-charts`. Tempo is 3.x: the compactor is replaced by the backend scheduler/worker, retention is set there.
-- **Tempo's Jaeger receivers** stay at the chart defaults: the chart's Service templates require them (`receivers.jaeger:
-  null` fails to render). Nothing sends Jaeger and the Service is internal.
-- **Prometheus Operator CRDs** come from the `prometheus-operator-crds` chart (server-side apply, upgraded with the chart)
-  instead of kube-prometheus-stack's `crds/` directory.
-- **No default-deny in `observability`** yet (see Pod Security above); the apps keep theirs. To be revisited with Phase 6.
-- **Collector component names** follow the Collector's renames (`file_log`, `k8s_attributes`, `otlp_grpc`, `otlp_http`);
-  the `debug` exporter is not in any pipeline.
-- **Image preload** (`make platform-images`): not in the plan; added because kubelet pulls of ~15 images one by one
-  through the Podman DNS took longer than Helm's timeout.
-
 ## Visualization and status page (Phase 4)
 
 ```mermaid
@@ -330,10 +331,10 @@ flowchart LR
 
 | URL | What |
 |---|---|
-| http://status.localtest.me | Status page ([`../web/apps/status`](../web/README.md)): UP / DEGRADED / DOWN per service, RPS, 5xx %, p95 with sparklines, active alerts |
-| http://status.localtest.me/api/v1/services | Status API JSON ([contract](../services/README.md#status-api)); also `/api/v1/services/{name}` and `/api/v1/alerts` |
-| http://grafana.localtest.me/d/shd-overview | Service Health Overview |
-| http://grafana.localtest.me/d/shd-service-detail?var-service=payment | Service Detail |
+| https://status.localtest.me | Status page ([`../web/apps/status`](../web/README.md)): UP / DEGRADED / DOWN per service, RPS, 5xx %, p95 with sparklines, active alerts |
+| https://status.localtest.me/api/v1/services | Status API JSON ([contract](../services/README.md#status-api)); also `/api/v1/services/{name}` and `/api/v1/alerts` |
+| https://grafana.localtest.me/d/shd-overview | Service Health Overview |
+| https://grafana.localtest.me/d/shd-service-detail?var-service=payment | Service Detail |
 
 **Routing.** Both releases attach an `HTTPRoute` for `status.localtest.me`: `status-web` with prefix `/`, `status-api` with prefix
 `/api`. Gateway API picks the longest matching prefix, so `/api/...` reaches the API and everything else the page: one origin, no
@@ -367,86 +368,203 @@ No Telemetry Pipeline dashboard: its health is covered by alerts in Phase 5; ad-
 
 ![Service Health Overview during the fault test: 5xx spike on payment and order, then the User latency breach](../docs/screenshots/grafana-overview.png)
 
-## Verification
+## Alerting and notification (Phase 5)
 
-`make verify` runs [`scripts/verify.sh`](scripts/verify.sh) (Phase 2), [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh)
-([Phase 3](#phase-3-evidence)) and [`scripts/verify-status.sh`](scripts/verify-status.sh) ([Phase 4](#phase-4-evidence)) against the running cluster. `verify.sh` checks the Phase 2 exit criteria. It uses
-`curl --resolve api.localtest.me:80:127.0.0.1` on the host so it does not depend on the host resolver, and a throwaway
-`curl` pod in a `netcheck` namespace (outside `apps`) for the in-cluster checks.
-
-Evidence from `make down && make up && make verify` (Podman 6.1.4 rootful machine, macOS arm64), trimmed:
-
-```text
-$ make down && make up        # from scratch: 376 s (two runs: 376 s and 468 s; mostly Envoy Gateway image pulls)
-Container engine: podman
-  ok    podman 6.1.4, rootful, running
-  ok    engine resources: 4 CPUs / 9 GiB
-  ok    kind v0.33.0
-  ok    kubectl v1.37.2 (node image v1.36)
-  ok    helm v4.3.1
-  ok    helm-diff plugin
-  ok    helmfile version v1.8.2
-WARNING: gateway ports 80/443 bind to 0.0.0.0 (reachable from the network); see deploy/README.md
-...
-NAME            NAMESPACE              CHART                                     VERSION   DURATION
-apps-baseline   apps                   ./charts/namespace-baseline               0.1.0           0s
-envoy-gateway   envoy-gateway-system   oci://docker.io/envoyproxy/gateway-helm   v1.9.3       1m48s
-edge            envoy-gateway-system   ./charts/edge                             0.1.0           0s
-payment         apps                   ./charts/microservice                     0.1.0           3s
-user            apps                   ./charts/microservice                     0.1.0           3s
-order           apps                   ./charts/microservice                     0.1.0           3s
-coredns: *.localtest.me -> envoy-edge.envoy-gateway-system.svc.cluster.local (configured, CoreDNS restarted)
-
-$ make verify
-== 1. Readiness of the platform
-  PASS  Gateway envoy-gateway-system/edge Programmed=True
-  PASS  deployment apps/user available
-  PASS  deployment apps/order available
-  PASS  deployment apps/payment available
-== 2. Host -> gateway (http://api.localtest.me:80)
-  WARN  host DNS does not resolve api.localtest.me; add it to /etc/hosts (see deploy/README.md)
-  PASS  POST /orders -> 201
-  PASS  GET /orders/32c2dacf27d2 -> 200
-  PASS  GET /users/u-1001 -> 200
-  PASS  GET /payments (not exposed) -> 404
-  PASS  GET /admin/faults (not exposed) -> 404
-  PASS  GET /livez (not exposed) -> 404
-  PASS  GET /readyz (not exposed) -> 404
-  PASS  GET /docs (not exposed) -> 404
-  PASS  GET /orders/../admin/faults (not exposed) -> 404
-  PASS  GET /orders/%2e%2e/admin/faults (not exposed) -> 404
-  PASS  GET /users/..%2fadmin/faults (not exposed) -> 404
-  PASS  POST /payments (not exposed) -> 404
-  PASS  PUT /admin/faults (not exposed) -> 404
-== 3. Pod -> gateway via CoreDNS rewrite (namespace netcheck, outside apps)
-  PASS  api.localtest.me resolves in-cluster to the envoy-edge Service -> 10.96.232.202
-  PASS  pod: POST http://api.localtest.me/orders -> 201
-  PASS  pod: GET http://api.localtest.me/users/u-1001 -> 200
-== 4. NetworkPolicy (default deny in apps)
-  PASS  pod outside apps -> payment.apps directly (blocked) -> 000
-  PASS  pod outside apps -> user.apps directly (blocked) -> 000
-  PASS  pod outside apps -> order.apps directly (blocked) -> 000
-  PASS  order -> user and order -> payment allowed (POST /orders returned 201 above)
-== 5. Readiness probe: not ready => out of endpoints, not restarted
-  PASS  EndpointSlice user: endpoint ready (after 8 s) -> false
-  PASS  gateway GET /users/u-1001 while not ready -> 503
-  PASS  /livez still healthy -> 200
-  PASS  restartCount unchanged after 35 s -> 0
-  PASS  EndpointSlice user: endpoint ready after restore -> true
-  PASS  gateway GET /users/u-1001 after restore -> 200
-
-verify: 30 passed, 0 failed
-
-$ make cluster-up deploy      # second run: idempotent, 5 s
-kind cluster 'shd' already exists
-coredns: *.localtest.me rewrite already present (unchanged)
-
-# Graceful shutdown: 150 requests (every 0.2 s) through the gateway during `kubectl rollout restart deploy/user`
-    150 200
+```mermaid
+flowchart LR
+  prom[("Prometheus<br/>rules every 30 s")] -->|firing / resolved| am["Alertmanager<br/>group, inhibit, route"]
+  am -->|"severity=critical"| oncall(["oncall@ inbox"])
+  am -->|"severity=warning"| team(["team@ inbox"])
+  am -->|"Watchdog"| hb["heartbeat (no-op locally)"]
+  oncall & team --> mailpit["Mailpit<br/>mail.localtest.me"]
+  sapi["Status API"] -->|"/api/v2/alerts"| am
 ```
 
-Before the `BackendTrafficPolicy` was added, check 5 returned **200** instead of 503 through the gateway (Envoy panic
-mode, see [Edge and routing](#edge-and-routing)), although the EndpointSlice already showed `ready=false`.
+Release `alerting` ([`charts/alerting`](charts/alerting)) holds everything that decides *when* and *whom* to notify:
+
+| Part | Where | What |
+|---|---|---|
+| Rules | [`rules/*.rules.yaml`](charts/alerting/rules) | Plain Prometheus rule files, wrapped unchanged in one `PrometheusRule` each. Recording rules per `service`: request rate, 5xx rate and ratio (5 m, 1 h), p95 latency |
+| Unit tests | [`tests/*.test.yaml`](charts/alerting/tests) | `promtool test rules`: every alert fires for the faulty input and stays silent for healthy, flapping or out-of-scope input (e.g. `/admin` 500s, 401s) |
+| Alertmanager | [`alertmanager/alertmanager.yaml`](charts/alerting/alertmanager/alertmanager.yaml), [`email.tmpl`](charts/alerting/alertmanager/email.tmpl) | Rendered into the Secret `alertmanager-shd`, which kube-prometheus-stack uses through `alertmanagerSpec.configSecret`; tested with `amtool` ([`tests/alertmanager.test.sh`](charts/alerting/tests/alertmanager.test.sh): config, routing per alert, template rendering) |
+| Mailpit | [`templates/mailpit.yaml`](charts/alerting/templates/mailpit.yaml) | `axllent/mailpit` v1.33.0, SMTP on 1025, UI and API on 8025 (`mail.localtest.me`; the send API `/api/v1/send` is blocked at the edge), last 500 messages, no PVC, metrics scraped |
+
+**Rules** (thresholds match the Status API, so the page and the email agree; runbooks in [`../docs/runbooks`](../docs/runbooks/README.md)):
+
+| Alert | Expression (simplified) | `for` | Severity |
+|---|---|---|---|
+| `ServiceDown` | `min by (namespace, service) (probe_success{job="blackbox-readyz"}) == 0` | 1m | critical |
+| `HighErrorRate` | `service:http_server_errors:ratio_rate5m > 0.05` (5xx only, `/admin` excluded) | 5m | critical |
+| `HighLatencyP95` | `service:http_server_request_duration_seconds:p95_rate5m > 0.5` | 5m | warning |
+| `HighLatencyP95` | same for `service="payment"` `> 1` | 5m | critical |
+| `ErrorBudgetBurn` | order 5xx ratio over 1 h **and** 5 m `> 14.4 × 0.5 %` (SLO 99.5 %) | 2m | critical |
+| `PodNotReady` | `kube_pod_status_ready{namespace="apps", condition="false"} == 1`, `service` from `kube_pod_labels` | 2m | warning |
+| `PodCrashLooping` | `CrashLoopBackOff` in the last 5 m (`kube_pod_container_status_waiting_reason`) | 5m | warning |
+| `TelemetryPipelineDown` | Collector, Loki, Tempo or blackbox target down; no Collector at all; Collector exporter failures (`reason` label) | 5–10m | warning |
+| `Watchdog` | `vector(1)` | – | none |
+
+Every alert has the labels `severity` and `service` and the annotations `summary`, `description`, `runbook_url` (GitHub)
+and `dashboard_url` (Service Detail or Overview). The `service` label comes from the blackbox `Probe` (`ServiceDown`), from
+the OTLP resource attribute `service.name` (`label_replace` of `service_name`) or from the pod label
+`app.kubernetes.io/name`, which kube-state-metrics exports (`metricLabelsAllowlist: pods=[app.kubernetes.io/name]`).
+
+**Routing.** `group_by: [alertname, service]`; `critical` → `oncall-email` (group_wait 30s, group_interval 5m,
+repeat 4h), `warning` → `team-email` (1m, 10m, 24h), `Watchdog` → `heartbeat` every minute (a no-op receiver locally; in
+production an external dead man's switch), `info`/`none` → `null`, anything else → `team-email`. `send_resolved: true`.
+The email (HTML and text) lists each alert with summary, description, labels, start/end and links to the runbook, the
+dashboard, the Prometheus query, the Alertmanager view and a pre-filled silence.
+
+**Inhibition.** `ServiceDown` mutes `HighErrorRate`, `HighLatencyP95` and `ErrorBudgetBurn` with the same `service`; the
+critical payment latency alert mutes its warning; `PodNotReady`/`PodCrashLooping` mute kube-prometheus-stack's slower
+`KubePodNotReady`/`KubePodCrashLooping` for the same pod; `KeycloakDown` mutes `LoginFailureSpike` and `TokenLatencyHigh`.
+
+**Checks.** `make lint` runs `promtool check rules` and `amtool check-config`; `make test` runs the promtool unit tests and
+the Alertmanager routing tests (`make rules-test`). Both use the Prometheus and Alertmanager images of the deployed
+versions through the container engine, so nothing has to be installed.
+
+### Failure scenarios (`scripts/demo.sh`)
+
+```bash
+make demo            # scripts/demo.sh all: a -> c -> b -> d, then recovery and RESOLVED emails (~25 min)
+scripts/demo.sh a    # one scenario (a|b|c|d) with reset; NO_RESOLVE=1 skips waiting for the RESOLVED email
+scripts/demo.sh status
+make demo-reset      # reset fault injection, scale everything back to 1
+```
+
+| Scenario | Fault | Expected |
+|---|---|---|
+| a | payment `error_rate=0.3` | payment `DEGRADED`, then `DOWN`; `HighErrorRate` (critical) email to on-call |
+| c | payment scaled to 0 (right after a) | `ServiceDown` (critical) email; payment's still active `HighErrorRate` is **suppressed** by the inhibition rule |
+| b | user `latency_ms=800` | user `DEGRADED`; `HighLatencyP95` (warning) email to the team |
+| d | order `ready=false` | `PodNotReady` (warning) email to the team (and `ServiceDown`: its only pod gets no traffic); the pod is not restarted |
+
+Each step polls the Alertmanager API, Mailpit's API (subject, recipient, runbook and dashboard links) and the Status API.
+The script reaches them, and the services' `/admin/faults`, through `kubectl port-forward`, so it does not depend on the
+gateway or on single sign-on. After the reset it waits until every alert has resolved and its `RESOLVED` email arrived.
+
+### NetworkPolicies (`observability`)
+
+Release `observability-baseline` (chart `namespace-baseline`, [`values/observability-baseline.yaml`](values/observability-baseline.yaml))
+is installed before any other release of the namespace: `default-deny-all`, DNS, and one allow-list per flow. The
+components come from third-party charts that render no policies, so the flows are listed in one place:
+
+| Policy | Allows |
+|---|---|
+| `allow-kube-apiserver-egress` | every pod → API server (6443/443; operator, sidecars, kube-state-metrics, Collector `k8s_attributes`, admission Jobs) |
+| `allow-operator-webhook` | API server → Prometheus Operator admission webhook (10250) |
+| `allow-prometheus-egress` / `allow-prometheus-scrape` | Prometheus → pods in every namespace and the node (kubelet 10250, node-exporter 9100); Prometheus → every pod here |
+| `allow-prometheus-ingress` | Grafana, Collector (OTLP push), Tempo (remote write), Status API (`apps`), Envoy (UI) → 9090 |
+| `allow-alertmanager-*` | Prometheus, Grafana, Status API, Envoy → 9093; Alertmanager → Mailpit 1025; gossip with itself |
+| `allow-mailpit-ingress` | Alertmanager → 1025, Envoy → 8025 |
+| `allow-grafana-*` | Envoy → 3000; Grafana → Prometheus, Loki, Tempo, Alertmanager, and HTTPS to public addresses (plugin installs from grafana.com at startup) |
+| `allow-collector-*`, `allow-loki-*`, `allow-tempo-*` | `apps`, the Envoy proxies and Keycloak → Collector 4317/4318; Collector → Prometheus, Tempo, Loki; Grafana → Loki, Tempo; Tempo → Prometheus |
+| `allow-blackbox-egress` | blackbox exporter → `apps` pods on 8080 |
+
+node-exporter uses the host network and kubelet probes come from the node, so NetworkPolicy does not apply to them. The
+API server and the kubelet have node IPs (not pods); their rules allow the port to any address rather than guessing the
+node network of the container engine.
+
+## Identity and single sign-on (Phase 6)
+
+```mermaid
+flowchart LR
+  browser(["browser"]) -->|"HTTPS *.localtest.me"| gw["Envoy Gateway<br/>TLS, OIDC, JWT, RBAC"]
+  gw -->|"ops session, group sre"| prom["Prometheus / Alertmanager / Mailpit"]
+  gw -->|"ops session"| status["status page + API"]
+  gw -->|"customers session<br/>+ forwarded token"| shop["shop + /api"]
+  gw -->|"Bearer JWT"| api["order, user"]
+  gw <-->|"code exchange, JWKS<br/>(own URL, mkcert CA)"| kc["Keycloak<br/>sso.localtest.me"]
+  graf["Grafana"] -->|"own OAuth"| kc
+  order["order"] -->|"client credentials"| kc
+  kc --> pg[("PostgreSQL")]
+  cm["cert-manager"] -->|"*.localtest.me cert"| gw
+```
+
+**TLS.** [`scripts/mkcert-ca.sh`](scripts/mkcert-ca.sh) creates mkcert's local CA if it does not exist (without installing it
+anywhere), stores it as the Secret `cert-manager/mkcert-ca` and the public CA certificate as the ConfigMap `localtest-ca` in every
+namespace with clients (`apps`, `observability`, `loadgen`, `identity`, `envoy-gateway-system`). cert-manager v1.21 (release
+`cert-manager`, CRDs as templates with `crds.keep`) issues the `*.localtest.me` ECDSA certificate (90 days, renewed after 60) for
+the Gateway's new HTTPS listener (443 → NodePort 30443). The HTTP listener accepts only the `https-redirect` route of the edge
+chart: 301 to HTTPS for the browser hosts, 404 for `api.localtest.me` (no redirect for clients that may send a token).
+**Trust the CA once** with `mkcert -install` (it may ask for your password), or use `make browser`, which accepts certificates
+chained to the CA in a separate Chrome profile (`--ignore-certificate-errors-spki-list` with the CA key's hash).
+
+**Keycloak.** [`scripts/keycloak-operator.sh`](scripts/keycloak-operator.sh) applies the official Keycloak Operator 26.8.1
+manifests, pinned and patched with kubectl's built-in kustomize ([`keycloak-operator/`](keycloak-operator)): namespace `identity`
+(also the ClusterRoleBinding subject), restricted Pod Security, `IfNotPresent`. The four CRDs (~1 MB together) are applied
+server-side. Release `identity` ([`charts/identity`](charts/identity)) holds the `Keycloak` CR, PostgreSQL 18 (StatefulSet, 2 Gi PVC,
+UID 70, read-only root filesystem), the `sso.localtest.me` route and the realms:
+
+| `Keycloak` setting | Value | Why |
+|---|---|---|
+| `hostname` | `https://sso.localtest.me`, strict | One issuer for browsers, the gateway and the services |
+| `http.httpEnabled`, `proxy.headers` | `true`, `xforwarded` | Edge TLS at the gateway |
+| `networkPolicy` | HTTP 8080 from the Envoy proxies only, management 9000 from Prometheus only | Forwarded headers can only come from the gateway |
+| Metrics | `metrics-enabled`, `http-metrics-histograms-enabled`, feature `user-event-metrics` with `event-metrics-user-events` | `ServiceMonitor` by the operator; alerts and the Sign-ins panel |
+| `tracing` | OTLP/gRPC to the node-local Collector, `parentbased_traceidratio` 1.0 | Keycloak and its JDBC spans in Tempo |
+| `resources` | requests 200m / 640 Mi, limit 1 Gi | Operator default is 1700 Mi requests |
+| `bootstrapAdmin` | Secret `keycloak-admin` | Admin console at https://sso.localtest.me/admin |
+
+Realms are YAML `RealmRepresentation`s in [`charts/identity/realms`](charts/identity/realms), imported by `KeycloakRealmImport`
+with every secret as a placeholder from the Secret `identity/realm-secrets`. [`scripts/identity-secrets.sh`](scripts/identity-secrets.sh)
+generates all client secrets and demo passwords once per cluster and copies each client secret to the namespace that uses it;
+`make sso-users` prints the logins. **Realm changes are not applied to an existing realm** (an import only creates): delete the
+realm in the admin console (or `kubectl -n identity exec keycloak-0 -- /opt/keycloak/bin/kcadm.sh …`), delete the
+`KeycloakRealmImport`, and run `make deploy`; or recreate the cluster.
+
+**Edge authentication** (release `sso-apps` in `apps`, `sso-observability` in `observability`, chart [`sso`](charts/sso)):
+
+| Policy | Routes | What Envoy does |
+|---|---|---|
+| `ops-ui` | `prometheus`, `alertmanager`, `mailpit` | OIDC login (`ops` realm, client `ops-gateway`, PKCE), cookies `ops-access-token`/`ops-id-token` on `.localtest.me` (one login for all three), access token forwarded and validated by the JWT filter (audience `ops-gateway`), authorization: `groups` contains `sre`, else 403 |
+| `status-ui` | `status-web`, `status-api` | OIDC login (`ops` realm), every engineer |
+| `shop` | `shop-web` (incl. `/api/orders` → order, `/api/me` → user) | OIDC login (`customers` realm, client `shop-gateway`), access token forwarded to the services (backend for frontend) |
+| `api` | `order`, `user` on `api.localtest.me` | JWT only: `customers` realm, audience `shop-api`, otherwise 401 |
+
+The OIDC policies use `redirectURL: https://%REQ(:authority)%/oauth2/callback` (one policy, several hosts), `logoutPath:
+/oauth2/logout`, and `denyRedirect` for requests with `X-Requested-With: fetch` (the web apps' API calls get 401 instead of a login
+page). Envoy reaches Keycloak for the code exchange and the JWKS at its public URL, served by the gateway itself: the policies'
+`backendRefs` point to the gateway's own Service `envoy-edge` (port 443, EDS endpoints; a `ReferenceGrant` in the edge chart allows
+it), and a `BackendTLSPolicy` on that Service sets the TLS name `sso.localtest.me` and trusts the mkcert CA, following the
+[Envoy Gateway OIDC task](https://gateway.envoyproxy.io/docs/tasks/security/oidc/#connect-to-an-oidc-provider-with-self-signed-certificate);
+calls are retried on transient failures. (A DNS-resolved `Backend` for `sso.localtest.me` was tried first: its endpoints briefly
+disappeared when cluster DNS answers were empty, which failed logins with "no healthy upstream".) Envoy renews expired access tokens with the refresh token (a redirect to the same URL with new
+cookies). Grafana is not behind a policy: it uses its own Keycloak OAuth (`ops` realm, client `grafana`, PKCE,
+`role_attribute_path` on `groups`, strict) and keeps the local admin as break-glass access.
+
+**Services and load generator.** `auth.enabled` in the microservice chart sets `AUTH_*` (and `OAUTH_*` for client credentials),
+mounts the CA and adds egress to the Envoy proxies (port 10443) to the service's NetworkPolicy: the services fetch the JWKS and
+tokens at the public URL, like everyone else. Details in [services/README.md](../services/README.md#authentication). k6 uses the
+client credentials of the test client `loadgen` ([loadgen/README.md](../loadgen/README.md)).
+
+**NetworkPolicies (`identity`, release `identity-baseline`).** Default deny and DNS; the operator → API server; every pod of the
+namespace (Keycloak and the realm import Jobs) → PostgreSQL 5432 and → the Collector 4317; Keycloak → its own pods on 7800.
+Ingress to Keycloak is the operator-managed policy above. `apps` and `observability` allow the services and Grafana to reach the
+gateway on 10443, and the Collector to receive OTLP from `identity`.
+
+**Identity observability.** Prometheus scrapes Keycloak (`up{namespace="identity"}`, `keycloak_user_events_total{realm, event,
+error}`, `http_server_requests_seconds_*`) and cert-manager (`certmanager_certificate_expiration_timestamp_seconds`); Keycloak's
+traces show up in Tempo and in the service graph (gateway → keycloak → postgres). Alerts `KeycloakDown`, `LoginFailureSpike`,
+`TokenLatencyHigh` ([rules](charts/alerting/rules/identity.rules.yaml), [runbooks](../docs/runbooks/README.md)); the Overview
+dashboard has two more panels: Sign-ins (Keycloak) and Rejected requests (401/403). `scripts/demo.sh e` scales Keycloak to 0.
+
+## Verification
+
+`make verify` runs the automated checks against the running cluster, one script per phase:
+
+| Script | Checks |
+|---|---|
+| [`scripts/verify.sh`](scripts/verify.sh) | Phase 2: gateway and routes from the host (`curl --resolve`, so the host resolver does not matter) and from a throwaway pod in a `netcheck` namespace (CoreDNS rewrite), what is *not* exposed at the edge, the `apps` NetworkPolicies, and readiness (a not-ready pod leaves the endpoints and is not restarted) |
+| [`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh) | Phase 3: observability pods and PVCs, metrics/logs/traces of all three services in Prometheus, Loki and Tempo, the service graph, exemplars, blocked write endpoints at the edge, Grafana login and datasources |
+| [`scripts/verify-status.sh`](scripts/verify-status.sh) | Phase 4: status page and Status API contract, NetworkPolicies of the status workloads, both dashboards have data for every service, and the signal correlations followed end to end |
+| [`scripts/verify-identity.sh`](scripts/verify-identity.sh) | Phase 6: Keycloak, PostgreSQL and realm imports ready; the served certificate; HTTPS on every host and the HTTP redirects; SSO (no session → Keycloak, `fetch()` → 401, `sre` reaches all four UIs with one login, `viewer` gets 403 on Prometheus/Alertmanager/Mailpit); Grafana roles per group and the break-glass admin; API 401 for missing and forged tokens and 201 with a client-credentials token, 401s not counted as 5xx; the shop flow (login, profile, order, list); Order's client-credentials call to Payment with the customer in the audit log; Keycloak metrics and alert rules; `identity` NetworkPolicies |
+| [`scripts/verify-alerting.sh`](scripts/verify-alerting.sh) | Phase 5: the project's rules loaded and healthy, recording rules have data, Watchdog firing, Alertmanager runs the project's configuration, a test alert arrives as email in Mailpit, every scrape target is up under the `observability` default deny, and direct access from another namespace is blocked. The failure scenarios themselves run with `make demo` |
+
+Each check prints `PASS`/`FAIL` and the script exits non-zero on any failure. The checks retry while the first export and
+scrape cycles complete, so they can run right after `make up`. Since Phase 6 they call the gateway over HTTPS with the mkcert CA,
+pin every `*.localtest.me` host to 127.0.0.1 (`curl --resolve`, independent of the host's DNS resolver), get API tokens with client
+credentials and log in like a browser with [`scripts/oidc-login.py`](scripts/oidc-login.py) (Python standard library: follows the
+redirect to Keycloak, submits the login form, keeps the gateway's cookies). Shared helpers: [`scripts/edge-lib.sh`](scripts/edge-lib.sh).
 
 Readiness by hand:
 
@@ -458,168 +576,26 @@ kubectl -n apps get endpointslice -l kubernetes.io/service-name=user \
 curl -X DELETE localhost:18081/admin/faults
 ```
 
-### Phase 3 evidence
+## DNS blocked on your network
 
-[`scripts/verify-telemetry.sh`](scripts/verify-telemetry.sh) runs after `verify.sh`. It queries through the gateway
-(`--resolve <ui>.localtest.me:80:127.0.0.1`), Grafana's datasource proxy for Loki and Tempo, and retries each check for up
-to 4 minutes while the first export and scrape cycles complete. Final run from scratch (Podman 6.1.4, macOS arm64), trimmed:
+`*.localtest.me` is a public DNS name that resolves to `127.0.0.1`. Some resolvers (home routers, corporate DNS) drop such answers
+as DNS-rebinding protection; check with `dig +short shop.localtest.me` (empty) versus `dig +short shop.localtest.me @1.1.1.1`
+(`127.0.0.1`). Inside the cluster nothing changes (CoreDNS rewrites the names to the gateway). On the host:
 
-```text
-$ make down && make up        # 352 s (images cached by the engine; first ever run ~15 min of pulls)
-platform images: 15 referenced, 15 not on the node yet
-platform images: loaded 15 into shd-control-plane
-NAME                       NAMESPACE              CHART                                               VERSION   DURATION
-prometheus-operator-crds   observability          prometheus-community/prometheus-operator-crds       32.0.2          4s
-blackbox-exporter          observability          prometheus-community/prometheus-blackbox-exporter   11.20.2         3s
-otel-collector             observability          open-telemetry/opentelemetry-collector              0.178.1        12s
-kube-prometheus-stack      observability          prometheus-community/kube-prometheus-stack          92.17.0        25s
-tempo                      observability          grafana-community/tempo                             3.2.1          26s
-loki                       observability          grafana-community/loki                              20.2.1         47s
-observability-config       observability          ./charts/observability-config                       0.1.0           0s
-loadgen                    loadgen                ../loadgen                                          0.1.0           1s
+- **Scripts:** `make verify`, `make demo` and [`scripts/oidc-login.py`](scripts/oidc-login.py) do not use the host resolver
+  (`curl --resolve`, a pinned resolver in Python, `kubectl port-forward`).
+- **Browser without admin rights:** a separate Chrome profile with its own host mapping, which also accepts the mkcert CA:
 
-$ make verify                 # 86 s; Phase 2 part: 30 passed, 0 failed (as above)
-== 1. Observability workloads and storage
-  PASS  all pods Ready in observability (10)
-  PASS  all pods Ready in loadgen (1)
-  PASS  OTel Collector DaemonSet: one agent per node
-  PASS  PVC prometheus-kps-prometheus-db-prometheus-kps-prometheus-0 -> Bound 2Gi
-  PASS  PVC alertmanager-kps-alertmanager-db-alertmanager-kps-alertmanager-0 -> Bound 1Gi
-  PASS  PVC storage-loki-0 -> Bound 2Gi
-  PASS  PVC storage-tempo-0 -> Bound 2Gi
-== 2. Prometheus (via http://prometheus.localtest.me)
-  PASS  no scrape target down -> 22 targets, down: 0
-  PASS  OTLP http_server_request_duration_seconds for user/order/payment -> order payment user
-  PASS  business metric orders_created_total -> 178
-  PASS  business metric payments_processed_total -> 201
-  PASS  Tempo service graph edges (traces_service_graph_request_total) -> gateway->order gateway->user order->payment order->user user->gateway user->user
-  PASS  Tempo span metrics (traces_spanmetrics_calls_total) -> 1953
-  PASS  blackbox probe_success for user/order/payment -> order=1 payment=1 user=1
-  PASS  Envoy gateway metrics (envoy_cluster_upstream_rq_total) -> 764
-  PASS  Collector metrics: spans accepted -> 1963
-  PASS  Collector metrics: log records accepted -> 1403
-  PASS  Collector metrics: metric points accepted -> 126
-  INFO  Collector export failures since start -> 0
-  PASS  exemplars on http_server_request_duration_seconds -> 31 exemplars with trace_id
-== 3. Edge routes for the UIs
-  PASS  GET http://grafana.localtest.me/api/health -> 200
-  PASS  GET http://prometheus.localtest.me/-/ready -> 200
-  PASS  GET http://alertmanager.localtest.me/-/ready -> 200
-  PASS  POST prometheus.localtest.me/api/v1/write (blocked at the edge) -> 403
-  PASS  POST prometheus.localtest.me/api/v1/otlp/v1/metrics (blocked at the edge) -> 403
-  PASS  POST prometheus.localtest.me/-/reload (blocked at the edge) -> 403
-  PASS  POST prometheus.localtest.me/-/quit (blocked at the edge) -> 403
-== 4. Grafana (via http://grafana.localtest.me)
-  PASS  anonymous API access refused -> 401
-  PASS  chart default password rejected -> 401
-  PASS  login with the generated admin password -> 200
-  PASS  datasource prometheus health -> OK
-  PASS  datasource loki health -> OK
-  PASS  datasource tempo health -> OK
-== 5. Loki logs and Tempo traces (through Grafana's datasource proxy)
-  PASS  Loki: user JSON log line with trace_id, severity, message -> 6ef055ae6abf8d88e619c39b49414abf INFO 'request completed'
-  PASS  Loki: order JSON log line with trace_id, severity, message -> 85c961c87ac24de7119f4bbb981c16ce INFO 'request completed'
-  PASS  Loki: payment JSON log line with trace_id, severity, message -> 6ef055ae6abf8d88e619c39b49414abf INFO 'request completed'
-  PASS  Tempo: POST /orders trace (trace_id from a Loki line) spans gateway -> order -> user/payment -> trace_id 4792ae6fe56a5c72a9f9cbc2e9e7e2c0 from Loki: 7 spans, edges: gateway->order order->payment order->user
+  ```bash
+  make browser
+  # equivalent to (Chrome or Edge):
+  open -na "Google Chrome" --args --user-data-dir="$HOME/.shd-chrome" \
+    --host-resolver-rules="MAP *.localtest.me 127.0.0.1"   # plus --ignore-certificate-errors-spki-list=<CA key hash>
+  ```
 
-verify-telemetry: 36 passed, 0 failed
-```
-
-One `POST /orders` trace as Tempo returns it (service, kind, span name; indentation = parent):
-
-```text
-gateway  SERVER  ingress                                      http.url=http://api.localtest.me/orders
-gateway  CLIENT    router httproute/apps/order/rule/0 egress
-order    SERVER      POST /orders                               201
-order    CLIENT        GET  -> user    SERVER  GET /users/{user_id}   200
-order    CLIENT        POST -> payment SERVER  POST /payments         201
-```
-
-A Loki line of the same request (structured metadata trimmed): `{service_name="order", k8s_namespace_name="apps",
-k8s_container_name="order", deployment_environment_name="kind"}` `request completed` with `severity_text=INFO`,
-`trace_id`, `span_id`, `http_route=/orders`, `http_response_status_code=201`, `k8s_pod_name`, `logger=shd.runtime`.
-
-In the service graph, `user->gateway` and `user->user` are Tempo's **virtual client node**, which Tempo always calls
-`user`: requests whose caller sends no spans (k6 and curl at the edge, `kubectl port-forward` calls to `/admin/faults`
-in `verify.sh`). They are not the User service.
-
-### Phase 4 evidence
-
-[`scripts/verify-status.sh`](scripts/verify-status.sh) runs last in `make verify`. It checks the status page and the documented JSON
-through the gateway, the NetworkPolicies from a pod outside `apps`, both dashboards through Grafana's API (every Prometheus query of
-the Overview has data for all three services, every panel of Service Detail including the logs panel has data for each service),
-and the correlations by following them: an exemplar of the p95 panel to its trace in Tempo, a Loki line's `trace_id` to its trace,
-the trace-to-logs query back to Loki, and the service-graph metrics behind the service map. Final run from scratch
-(`make down && make up && make verify`, Podman 6.1.4, macOS arm64): `make up` 429 s, `make verify` 290 s,
-**Phase 2: 30 passed, Phase 3: 36 passed, Phase 4: 27 passed, 0 failed**. The Phase 4 part:
-
-```text
-== 1. Status workloads
-  PASS  deployment apps/status-api available
-  PASS  deployment apps/status-web available
-== 2. Status page and Status API (http://status.localtest.me)
-  PASS  GET / (status page) -> 200 text/html
-  PASS  index.html is the status page
-  PASS  GET /services/payment (SPA fallback) -> 200 text/html
-  PASS  GET /assets/index-Dq5nv3id.js (hashed asset, long-lived cache) -> public, max-age=31536000, immutable
-  PASS  GET /api/v1/services matches the contract -> keys, sources ok, metrics and series for user/order/payment
-  PASS  all three services UP -> overall=UP user=UP order=UP payment=UP
-  PASS  GET /api/v1/services/payment -> 200 payment
-  PASS  GET /api/v1/services/unknown -> 404
-  PASS  GET /api/v1/alerts -> 200 ok
-  PASS  GET /admin/faults is not the Status API (served by the page) -> text/html
-  PASS  GET /docs is not the Status API (served by the page) -> text/html
-  PASS  GET /openapi.json is not the Status API (served by the page) -> text/html
-  PASS  GET /api/../admin/faults is not the Status API (served by the page) -> text/html
-  PASS  PUT /admin/faults (not routed to the API) -> 405
-== 3. NetworkPolicy (namespace netcheck-status, outside apps)
-  PASS  pod outside apps -> status-api.apps directly (blocked) -> 000
-  PASS  pod outside apps -> status-web.apps directly (blocked) -> 000
-  PASS  pod: GET http://status.localtest.me/api/v1/services via the gateway -> 200
-  PASS  status-api -> Prometheus 9090 and Alertmanager 9093 allowed (both sources ok above)
-== 4. Grafana dashboards (via http://grafana.localtest.me)
-  PASS  dashboards provisioned (sidecar): Service Health Overview, Service Detail -> Service Detail (7 panels); Service Health Overview (5 panels)
-  PASS  Overview: every panel has data for all three services -> data for user/order/payment in: Status, Request rate, Error % (5xx), p95 latency
-  PASS  Service Detail: every panel has data for each service -> all panels (incl. logs) have data for user/order/payment
-== 5. Correlations
-  PASS  datasource correlation settings (provisioned, macros not expanded) -> exemplars->tempo, loki trace_id->tempo, tempo->loki/prometheus, service map, node graph
-  PASS  exemplar on the p95 panel -> trace in Tempo -> trace_id b8786953191dee761f858d42275fdf57: 7 spans in Tempo
-  PASS  log line -> trace (derived field) -> logs of another service (traces to logs) -> trace_id b4208fa803efbe466ac22a74f65bddc2 (payment log line) -> Tempo services ['gateway', 'order', 'payment', 'user'] -> 2 order log lines
-  PASS  service map metrics (Tempo service graph) for the Tempo datasource -> gateway->order order->payment order->user
-
-verify-status: 27 passed, 0 failed
-```
-
-**Fault test** (k6 running, faults set with `kubectl port-forward` + `PUT /admin/faults`, Status API and the Overview's status query
-polled every 5 s; both always agreed):
-
-| Fault | Status API and Overview | After reset |
-|---|---|---|
-| Payment `error_rate=0.5` | payment `DEGRADED` after **41 s** (5xx 5.6%), order `DEGRADED` after **62 s** (its `POST /orders` return 502); peak 5xx ratio ≈ 50% payment / 35% order on the Error % panel | order `UP` after 242 s, payment after 263 s |
-| User `latency_ms=800` | user `DEGRADED` after **31 s** (p95 872 ms); order follows (it waits for user: p95 940 ms) | order `UP` after 269 s, user after 290 s |
-
-Detection within about one minute is the exit criterion. Recovery takes about five minutes on purpose: the status uses the
-5-minute windows of the alert rules, so the page and the on-call email (Phase 5) never disagree, and a short dip does not flap.
-The sparklines use 1-minute windows and show the recovery first. The Overview screenshot in
-[Visualization and status page](#visualization-and-status-page-phase-4) was taken during the User fault, with the earlier Payment
-error spike still in the 30-minute window; the status page screenshot is in [`../web/README.md`](../web/README.md).
-
-**Resources:** status-api 50 MiB, status-web (nginx) 5 MiB working set; images 200 MB (Python) and 63 MB (nginx).
-
-**Phase 4 deviations from the plan**
-
-- **Dashboards in `charts/observability-config/dashboards/`**, not `deploy/dashboards/`: Helm only reads files inside a chart
-  (`.Files.Glob`), and that chart already owns the other observability resources.
-- **Status rule thresholds**: 5xx > 5% (the `HighErrorRate` threshold); the architecture document said 1%, which would have
-  contradicted the alert. A fourth status `UNKNOWN` covers a missing data source. Both are noted in ADR 0006.
-- **Overview "firing alerts" is a Prometheus `ALERTS` table**, not Grafana's alert list panel, which lists Grafana-managed rules;
-  the project's rules are Prometheus rules (Phase 5). The Status API reads Alertmanager instead (silences and inhibition applied).
-- **Status API uses `/api/v1/query_range` too**, for the sparkline series, besides `/api/v1/query`.
-- **`microservice` chart**: `shdRuntime` and `tmpVolume` values so that the nginx image reuses the chart; the three services render
-  unchanged.
-- **shadcn CLI and TLS**: the CLI's HTTP client rejected `ui.shadcn.com`'s certificate chain with Node's bundled CA store; it ran with
-  `NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem` (macOS system CAs). The `--monorepo` scaffold uses turbo; the app was renamed from
-  `apps/web` to `apps/status`.
+  `make browser CHROME_APP="Microsoft Edge"` uses Edge. The flags only apply to that profile.
+- **With admin rights:** add the hosts to `/etc/hosts`, or a DNS resolver that answers `localtest.me` (e.g. `/etc/resolver/localtest.me`).
+- **curl by hand:** `curl --resolve shop.localtest.me:443:127.0.0.1 --cacert "$(mkcert -CAROOT)/rootCA.pem" https://shop.localtest.me`.
 
 ## Troubleshooting
 
@@ -637,7 +613,7 @@ point to private addresses (DNS-rebinding protection). Check with `dig +short ap
 `/etc/hosts` (needs admin rights) or test with `curl --resolve api.localtest.me:80:127.0.0.1 …`:
 
 ```text
-127.0.0.1 api.localtest.me grafana.localtest.me prometheus.localtest.me alertmanager.localtest.me status.localtest.me mail.localtest.me
+127.0.0.1 api.localtest.me grafana.localtest.me prometheus.localtest.me alertmanager.localtest.me status.localtest.me mail.localtest.me shop.localtest.me sso.localtest.me
 ```
 
 **Podman on macOS: port 80 binds to `0.0.0.0`.** The Podman machine publishes ports through `gvproxy`, which runs as
@@ -645,10 +621,11 @@ your user. macOS lets unprivileged processes bind ports below 1024 only on the w
 `listenAddress: 127.0.0.1` fails with `bind: permission denied`. On Podman + macOS the Makefile therefore writes a copy of
 the kind config with `listenAddress: "0.0.0.0"` (and prints a warning). The gateway is then reachable from your network
 unless the macOS firewall blocks incoming connections (System Settings → Network → Firewall; check with
-`/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate`). Phase 2 exposes only the routed business APIs; Phase 3 adds Grafana (own login, generated password, no anonymous access), Prometheus and Alertmanager (no authentication until Phase 6 SSO; their write and lifecycle endpoints answer 403 at the edge).
+`/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate`). Since Phase 6 every UI requires a Keycloak login (Prometheus, Alertmanager and Mailpit only for the `sre` group), the API requires a token, and Prometheus' write and lifecycle endpoints answer 403 at the edge; Keycloak's own login pages and admin console are reachable, protected by its passwords and brute-force detection.
 To keep everything on loopback instead, use Docker (Docker Desktop binds privileged ports through a privileged helper), or
 use unprivileged host ports: `make down && make up GATEWAY_LISTEN_ADDRESS=127.0.0.1 GATEWAY_HTTP_PORT=8080 GATEWAY_HTTPS_PORT=8443`.
-URLs from the host then need the port (`http://api.localtest.me:8080`), while pods keep using port 80.
+URLs from the host then need the port (`https://shop.localtest.me:8443`), while pods keep using port 443. Single sign-on
+does not work with a non-default HTTPS port: Keycloak's public URL and the OIDC redirect URLs are `https://<host>` on 443.
 
 **Podman must be rootful.** kind's Podman provider is experimental and needs a rootful machine:
 `podman machine stop && podman machine set --rootful && podman machine start`. `make prereqs` checks it.

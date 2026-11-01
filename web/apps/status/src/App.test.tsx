@@ -137,4 +137,13 @@ describe("App", () => {
       await screen.findByText("Status API unreachable")
     ).toBeInTheDocument()
   })
+
+  it("asks to sign in again when the single sign-on session expired", async () => {
+    mockApi(401)
+    renderApp()
+    expect(
+      await screen.findByText("Your session has expired")
+    ).toBeInTheDocument()
+    expect(screen.queryByText("Status API unreachable")).not.toBeInTheDocument()
+  })
 })

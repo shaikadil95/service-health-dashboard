@@ -17,6 +17,7 @@ from opentelemetry import trace
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .auth import Authenticator, AuthSettings
 from .otel import Telemetry, instrument_fastapi
 
 logger = logging.getLogger("shd.runtime")
@@ -247,11 +248,15 @@ def create_service_app(
     telemetry: Telemetry,
     faults: FaultInjector | None = None,
     lifespan: Lifespan | None = None,
+    auth: AuthSettings | None = None,
+    jwks_transport=None,
 ) -> FastAPI:
     """FastAPI app with probes, fault injection, access logs and OpenTelemetry instrumentation.
 
-    The runtime is available as ``app.state.runtime``. ``lifespan`` runs the service's own
-    startup/shutdown; readiness only turns green after it has started.
+    The runtime is available as ``app.state.runtime`` and the token validation as
+    ``app.state.auth`` (``AuthSettings.from_env()`` unless ``auth`` is given; disabled by default).
+    ``lifespan`` runs the service's own startup/shutdown; readiness only turns green after it has
+    started.
     """
     runtime = ServiceRuntime(
         telemetry=telemetry, lifecycle=Lifecycle(), faults=faults or FaultInjector()
@@ -269,10 +274,18 @@ def create_service_app(
                 logger.info("service started")
                 yield
         runtime.lifecycle.started = False
+        await authenticator.aclose()
         logger.info("service stopped")
+
+    authenticator = Authenticator(
+        auth if auth is not None else AuthSettings.from_env(),
+        telemetry,
+        jwks_transport=jwks_transport,
+    )
 
     app = FastAPI(title=title, version=version, lifespan=_lifespan)
     app.state.runtime = runtime
+    app.state.auth = authenticator
     app.include_router(health_router(runtime.lifecycle, runtime.faults))
     app.include_router(admin_router(runtime.faults))
     # Starlette runs the last added middleware first: access log wraps fault injection.

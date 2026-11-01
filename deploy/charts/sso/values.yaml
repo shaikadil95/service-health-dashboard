@@ -1,0 +1,21 @@
+# Keycloak as seen from Envoy: its public URL (issuer, TLS name), reached through the gateway itself.
+# Envoy connects to the gateway's Service directly (EDS endpoints) instead of resolving
+# sso.localtest.me by DNS; TLS is verified with the mkcert CA by the BackendTLSPolicy in charts/edge.
+idp:
+  host: sso.localtest.me
+  gatewayService:
+    name: envoy-edge
+    namespace: envoy-gateway-system
+    port: 443
+
+# OIDC login (authorization code flow) handled by Envoy: the browser holds only Envoy's encrypted,
+# HMAC-signed session cookies. Each entry:
+#   name, routes (HTTPRoute names in this namespace), realm, clientId, clientSecret (Secret with key
+#   client-secret), cookieDomain (optional, for SSO across subdomains), cookieNames (optional),
+#   forwardAccessToken, denyRedirectHeaders (requests that get 401 instead of a login redirect),
+#   jwt (optional: validate the forwarded access token: audiences, and allowGroups for
+#   authorization on the groups claim; without allowGroups every valid token is accepted).
+oidc: []
+
+# JWT validation only (APIs called with a bearer token). Each entry: name, routes, realm, audiences.
+jwt: []

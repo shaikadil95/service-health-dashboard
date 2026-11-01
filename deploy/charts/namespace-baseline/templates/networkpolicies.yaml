@@ -28,3 +28,12 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
+{{- range $name, $spec := .Values.policies }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+spec:
+  {{- toYaml $spec | nindent 2 }}
+{{- end }}

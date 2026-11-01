@@ -8,7 +8,7 @@ env:
   ALERTMANAGER_URL: http://kps-alertmanager.observability.svc:9093
   STATUS_SERVICES: user,order,payment
   STATUS_NAMESPACE: apps
-  GRAFANA_URL: http://grafana.localtest.me
+  GRAFANA_URL: https://grafana.localtest.me
   CACHE_TTL_SECONDS: "10"
   QUERY_TIMEOUT_SECONDS: "3"
   # Same thresholds as the alert rules (docs/architecture.md, section 7).

@@ -1,0 +1,30 @@
+# Alert and recording rules: every rules/*.rules.yaml becomes one PrometheusRule. Prometheus selects
+# all PrometheusRules in the cluster (ruleSelectorNilUsesHelmValues: false).
+rules:
+  enabled: true
+
+# Alertmanager configuration Secret (alertmanager/alertmanager.yaml + alertmanager/*.tmpl), referenced
+# by alertmanager.alertmanagerSpec.configSecret in deploy/values/kube-prometheus-stack.yaml.
+alertmanagerConfig:
+  enabled: true
+  secretName: alertmanager-shd
+
+# Mailpit: local SMTP sink and web UI that stands in for the on-call inbox (mail.localtest.me).
+# https://mailpit.axllent.org/docs/configuration/runtime-options/
+mailpit:
+  enabled: true
+  image:
+    repository: docker.io/axllent/mailpit
+    tag: v1.33.0
+    pullPolicy: IfNotPresent
+  # Oldest messages are deleted beyond this number; nothing is persisted (no PVC by design).
+  maxMessages: 500
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+  serviceMonitor:
+    enabled: true
+    interval: 30s

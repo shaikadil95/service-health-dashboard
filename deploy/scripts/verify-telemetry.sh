@@ -7,11 +7,17 @@
 #   4. Grafana: login with the generated password, no anonymous access, datasources healthy.
 #   5. Loki: JSON logs of every service with trace_id; Tempo: the trace of one of those log lines
 #      spans gateway -> order -> user and order -> payment.
-# Queries go through the edge Gateway (http://<ui>.localtest.me), pinned to 127.0.0.1 with --resolve.
+# Queries go through the edge Gateway (https://<ui>.localtest.me), pinned to 127.0.0.1 with --resolve.
+# Since Phase 6 Prometheus and Alertmanager require single sign-on: the script logs in once as the
+# demo user "sre" (deploy/scripts/oidc-login.py) and reuses the gateway's session cookies. Grafana
+# is queried with its break-glass admin (basic auth).
 set -euo pipefail
 
 KUBECTL=${KUBECTL:-kubectl}
-HTTP_PORT=${GATEWAY_HTTP_PORT:-80}
+# shellcheck source=edge-lib.sh
+source "$(dirname "$0")/edge-lib.sh"
+JAR=$(mktemp)
+trap 'rm -f "$JAR"' EXIT
 # Telemetry needs a few export/scrape cycles after a fresh deploy (k6 runs continuously).
 WAIT_SECONDS=${WAIT_SECONDS:-240}
 SERVICES=(user order payment)
@@ -27,12 +33,11 @@ ko() {
   failed=$((failed + 1))
 }
 
-ui() { # ui <host> <curl args...>
-  local host=$1
+ui() { # ui <host> <curl args...>: through the gateway, with the SSO session of "sre"
   shift
-  curl -s -m 15 --resolve "$host:$HTTP_PORT:127.0.0.1" "$@"
+  sso_curl "$JAR" "$@"
 }
-url() { echo "http://$1:$HTTP_PORT$2"; }
+url() { edge_url "$1" "$2"; }
 
 # promql <query> -> one line per series: "<label=value,...> <value>"
 promql() {
@@ -136,7 +141,12 @@ for pvc in prometheus-kps-prometheus-db-prometheus-kps-prometheus-0=2Gi \
   [[ $got == "Bound $want" ]] && ok "PVC $name -> $got" || ko "PVC $name -> ${got:-missing} (expected Bound $want)"
 done
 
-echo "== 2. Prometheus (via http://prometheus.localtest.me)"
+echo "== 2. Prometheus (via https://prometheus.localtest.me, signed in as sre)"
+if sso_login sre "$(url prometheus.localtest.me /-/ready)" "$JAR"; then
+  ok "single sign-on as sre (ops realm) for prometheus/alertmanager.localtest.me"
+else
+  ko "single sign-on as sre failed"
+fi
 eventually "no scrape target down" no_down_targets
 eventually "OTLP http_server_request_duration_seconds for user/order/payment" \
   series_for_all_services http_server_request_duration_seconds_count job
@@ -158,7 +168,7 @@ eventually "exemplars on http_server_request_duration_seconds" exemplars
 echo "== 3. Edge routes for the UIs"
 for host in grafana.localtest.me/api/health prometheus.localtest.me/-/ready alertmanager.localtest.me/-/ready; do
   code=$(ui "${host%%/*}" -o /dev/null -w '%{http_code}' "$(url "${host%%/*}" "/${host#*/}")")
-  [[ $code == 200 ]] && ok "GET http://$host -> $code" || ko "GET http://$host -> $code"
+  [[ $code == 200 ]] && ok "GET https://$host -> $code" || ko "GET https://$host -> $code"
 done
 for path in /api/v1/write /api/v1/otlp/v1/metrics /-/reload /-/quit; do
   code=$(ui prometheus.localtest.me -o /dev/null -w '%{http_code}' -X POST "$(url prometheus.localtest.me "$path")")
@@ -166,12 +176,12 @@ for path in /api/v1/write /api/v1/otlp/v1/metrics /-/reload /-/quit; do
     ko "POST prometheus.localtest.me$path -> $code (expected 403)"
 done
 
-echo "== 4. Grafana (via http://grafana.localtest.me)"
+echo "== 4. Grafana (via https://grafana.localtest.me)"
 password=$($KUBECTL -n observability get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d)
-gf() { ui grafana.localtest.me -u "admin:$password" "$@"; }
-code=$(ui grafana.localtest.me -o /dev/null -w '%{http_code}' "$(url grafana.localtest.me /api/datasources)")
+gf() { edge_curl -u "admin:$password" "$@"; }
+code=$(edge_curl -o /dev/null -w '%{http_code}' "$(url grafana.localtest.me /api/datasources)")
 [[ $code == 401 ]] && ok "anonymous API access refused -> $code" || ko "anonymous API access -> $code (expected 401)"
-code=$(ui grafana.localtest.me -u admin:prom-operator -o /dev/null -w '%{http_code}' "$(url grafana.localtest.me /api/user)")
+code=$(edge_curl -u admin:prom-operator -o /dev/null -w '%{http_code}' "$(url grafana.localtest.me /api/user)")
 [[ $code == 401 ]] && ok "chart default password rejected -> $code" || ko "chart default password -> $code (expected 401)"
 code=$(gf -o /dev/null -w '%{http_code}' "$(url grafana.localtest.me /api/user)")
 [[ $code == 200 ]] && ok "login with the generated admin password -> $code" || ko "login with the generated password -> $code"

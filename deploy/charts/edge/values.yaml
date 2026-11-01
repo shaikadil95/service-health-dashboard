@@ -5,10 +5,11 @@ envoyProxy:
   # Fixed Service name (instead of the generated envoy-<ns>-<gateway>-<hash>), so the CoreDNS
   # rewrite of *.localtest.me has a stable target: <serviceName>.<namespace>.svc.cluster.local.
   serviceName: envoy-edge
-  # kind maps host ports 80/443 to these NodePorts (deploy/kind/kind-config.yaml).
-  # Only listeners that exist are patched: the HTTPS listener (443 -> 30443) arrives in Phase 6.
+  # kind maps host ports 80/443 to these NodePorts (deploy/kind/kind-config.yaml). Only ports of
+  # existing listeners may be listed (a patch for a missing port creates a broken Service port).
   nodePorts:
     "80": 30080
+    "443": 30443
   replicas: 1
   # Envoy Gateway defaults to requests of 100m CPU / 512Mi; sized down for a laptop.
   resources:
@@ -32,10 +33,49 @@ envoyProxy:
 
 gateway:
   listeners:
+    # Plain HTTP only redirects to HTTPS (redirect.hostnames below); no route of another namespace
+    # can attach to it, so nothing is served without TLS.
     http:
       port: 80
-  # Namespaces whose HTTPRoutes may attach to the Gateway.
-  routeNamespaces: [apps, observability]
+    # TLS terminates here with the *.localtest.me certificate from cert-manager (tls below).
+    https:
+      port: 443
+  # Namespaces whose HTTPRoutes may attach to the HTTPS listener.
+  routeNamespaces: [apps, observability, identity]
+
+# HTTPS (Phase 6). Envoy Gateway's OIDC requires an HTTPS redirect URL. The mkcert local CA signs a
+# wildcard certificate; deploy/scripts/mkcert-ca.sh puts the CA into the Secret cert-manager/mkcert-ca.
+tls:
+  clusterIssuer:
+    name: mkcert-ca
+    caSecretName: mkcert-ca
+  certificate:
+    name: localtest-me
+    secretName: localtest-me-tls
+    dnsNames: ["*.localtest.me", "localtest.me"]
+    # mkcert's own leaf certificates last 825 days; a shorter life exercises cert-manager's renewal.
+    duration: 2160h # 90 days
+    renewBefore: 720h # 30 days
+
+# Envoy's own calls to Keycloak (OIDC code exchange, JWKS) go to the gateway's HTTPS listener
+# (sso.localtest.me) through the envoy-edge Service. The SecurityPolicies of these namespaces may
+# reference it; TLS is verified with the mkcert CA (ConfigMap from deploy/scripts/mkcert-ca.sh).
+idpBackend:
+  hostname: sso.localtest.me
+  caConfigMap: localtest-ca
+  policyNamespaces: [apps, observability]
+
+# http://<host> -> 301 https://<host> for the browser-facing hosts. The API host is deliberately not
+# redirected: a client that sends a token over plain HTTP has already leaked it, so it gets a 404.
+redirect:
+  hostnames:
+    - grafana.localtest.me
+    - prometheus.localtest.me
+    - alertmanager.localtest.me
+    - mail.localtest.me
+    - status.localtest.me
+    - shop.localtest.me
+    - sso.localtest.me
 
 backends:
   # 0 disables Envoy's panic mode, so endpoints that are not ready never receive traffic.

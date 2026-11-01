@@ -1,6 +1,6 @@
 # OpenTelemetry Collector (contrib) as a DaemonSet agent, chart open-telemetry/opentelemetry-collector.
 # Values reference: https://github.com/open-telemetry/opentelemetry-helm-charts/blob/main/charts/opentelemetry-collector/values.yaml
-# Topology and reasoning: docs/adr/0002-collector-topology.md.
+# Topology and reasoning: docs/architecture.md (Flow 1 and §5).
 #
 # Exactly one path per signal:
 #   traces  apps + Envoy --OTLP--> collector --OTLP gRPC--> Tempo

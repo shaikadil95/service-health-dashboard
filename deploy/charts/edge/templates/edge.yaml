@@ -82,6 +82,18 @@ spec:
       hostname: "*.localtest.me"
       allowedRoutes:
         namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: {{ .Values.gateway.listeners.https.port }}
+      hostname: "*.localtest.me"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ .Values.tls.certificate.secretName }}
+      allowedRoutes:
+        namespaces:
           from: Selector
           selector:
             matchExpressions:

@@ -18,7 +18,7 @@ import { AlertsTable } from "@/components/alerts-table"
 import { ServiceCard } from "@/components/service-card"
 import { StatusBadge } from "@/components/status-badge"
 import { ThemeToggle } from "@/components/theme-toggle"
-import { fetchAlerts, fetchServices } from "@/lib/api"
+import { fetchAlerts, fetchServices, SessionExpiredError } from "@/lib/api"
 import { formatTime } from "@/lib/format"
 
 // Matches the Status API's server-side cache; polling faster would only return cached data.
@@ -93,17 +93,31 @@ export function App() {
           )}
         </section>
 
-        {services.isError && (
+        {services.error instanceof SessionExpiredError && (
           <Alert variant="destructive">
-            <AlertTitle>Status API unreachable</AlertTitle>
+            <AlertTitle>Your session has expired</AlertTitle>
             <AlertDescription>
-              {String(services.error.message)}.{" "}
-              {data
-                ? `Showing the last answer from ${formatTime(data.generated_at)}.`
-                : "Retrying every 10 seconds."}
+              <button
+                className="underline"
+                onClick={() => window.location.reload()}
+              >
+                Sign in again
+              </button>
             </AlertDescription>
           </Alert>
         )}
+        {services.isError &&
+          !(services.error instanceof SessionExpiredError) && (
+            <Alert variant="destructive">
+              <AlertTitle>Status API unreachable</AlertTitle>
+              <AlertDescription>
+                {String(services.error.message)}.{" "}
+                {data
+                  ? `Showing the last answer from ${formatTime(data.generated_at)}.`
+                  : "Retrying every 10 seconds."}
+              </AlertDescription>
+            </Alert>
+          )}
         {unavailable.length > 0 && data && (
           <Alert>
             <AlertTitle>Monitoring data incomplete</AlertTitle>

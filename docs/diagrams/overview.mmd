@@ -1,7 +1,8 @@
 %% Architecture overview: Service Health Dashboard (local kind cluster)
 flowchart LR
   client(["Browser / k6"])
-  gw["Envoy Gateway<br/>*.localtest.me"]
+  gw["Envoy Gateway<br/>*.localtest.me (HTTPS, SSO)"]
+  kc["Keycloak<br/>identity namespace"]
 
   subgraph apps["apps namespace"]
     user["User svc"]
@@ -22,7 +23,8 @@ flowchart LR
   end
 
   client --> gw
-  gw --> order & user & pay
+  gw -- "OIDC / JWT" --> kc
+  gw --> order & user
   order --> user
   order --> pay
   gw --> graf & sapi

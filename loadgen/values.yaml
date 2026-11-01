@@ -7,8 +7,14 @@ image:
   tag: 2.3.0
   pullPolicy: IfNotPresent
 
-# Same URL as from the host: the CoreDNS rewrite sends *.localtest.me to the edge Gateway.
-baseUrl: http://api.localtest.me
+# Same URLs as from the host: the CoreDNS rewrite sends *.localtest.me to the edge Gateway.
+baseUrl: https://api.localtest.me
+# Client credentials of the test client "loadgen" (customers realm); the Secret is created by
+# deploy/scripts/identity-secrets.sh.
+tokenUrl: https://sso.localtest.me/realms/customers/protocol/openid-connect/token
+clientSecret: loadgen-client
+# CA of https://*.localtest.me (deploy/scripts/mkcert-ca.sh); Go (k6) reads SSL_CERT_FILE.
+caConfigMap: localtest-ca
 # Iterations per second; each makes 2-3 requests at the edge (POST order, GET order, sometimes
 # GET user), i.e. about 4-5 requests per second at the gateway.
 rate: 2

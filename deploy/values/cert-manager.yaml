@@ -1,0 +1,39 @@
+# cert-manager (oci://quay.io/jetstack/charts/cert-manager), Phase 6: issues the *.localtest.me
+# certificate of the Gateway's HTTPS listener from the mkcert local CA (ClusterIssuer mkcert-ca in
+# charts/edge). Values reference: https://cert-manager.io/docs/installation/helm/
+#
+# CRDs as templates of this release (crds.enabled), so Helm upgrades them with the chart; keep: true
+# leaves them (and every Certificate) in place if the release is uninstalled.
+crds:
+  enabled: true
+  keep: true
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 48Mi
+  limits:
+    memory: 128Mi
+
+webhook:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 24Mi
+    limits:
+      memory: 64Mi
+
+cainjector:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 48Mi
+    limits:
+      memory: 128Mi
+
+# Controller metrics (certificate expiry, issuance errors) for Prometheus.
+prometheus:
+  enabled: true
+  servicemonitor:
+    enabled: true
+    interval: 60s

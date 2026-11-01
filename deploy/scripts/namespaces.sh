@@ -16,6 +16,10 @@ declare -a namespaces=(
   # sets its own restricted-style securityContext.
   "observability=privileged"
   "loadgen=restricted"
+  # Phase 6: cert-manager (its chart sets restricted security contexts) and identity (Keycloak
+  # Operator, Keycloak, PostgreSQL).
+  "cert-manager=restricted"
+  "identity=restricted"
 )
 
 for entry in "${namespaces[@]}"; do

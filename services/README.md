@@ -52,9 +52,12 @@ Seeded users: `u-1001`, `u-1002`, `u-1003` (active) and `u-1004` (suspended).
 | Service | Method and path | Success | Client errors | Server or upstream errors |
 |---|---|---|---|---|
 | user | `GET /users/{id}` | 200 user | 404 unknown user | 500 (injected fault) |
-| order | `POST /orders` | 201 order (`confirmed`), `Location` header | 402 payment declined (order `payment_declined`), 422 invalid body, unknown or suspended user | 502, 503, 504 (see below), 500 (injected fault) |
-| order | `GET /orders/{id}` | 200 order | 404 | 500 (injected fault) |
+| user | `GET /users/me` | 200 the signed-in customer's profile, created on first use from the token | 404 without authentication | 500 (injected fault) |
+| order | `POST /orders` | 201 order (`confirmed`), `Location` header | 402 payment declined (order `payment_declined`), 422 invalid body, unknown or suspended user, `user_id` missing for a service account | 502, 503, 504 (see below), 500 (injected fault) |
+| order | `GET /orders` | 200 newest orders (`limit`, default 20): a customer's own, all for a service account | – | 500 (injected fault) |
+| order | `GET /orders/{id}` | 200 order | 404 (also for another customer's order) | 500 (injected fault) |
 | payment | `POST /payments` | 201 `approved` | 400 missing `Idempotency-Key`, 402 `declined` (amount above `PAYMENT_APPROVAL_LIMIT`), 422 invalid body, or the key was reused with a different body | 500 (injected fault) |
+| user, order, payment | business endpoints with authentication on | – | 401 missing or invalid token, 403 missing role (see [Authentication](#authentication)) | – |
 | all | `GET /livez`, `GET /readyz` | 200 | – | `/readyz` 503 when not ready |
 | all | `GET`, `PUT`, `DELETE /admin/faults` | 200 current settings | 422 invalid values | – |
 
@@ -85,6 +88,38 @@ while the same Payment instance is running. A restart, a rolling update or a sec
 `POST /orders` also does not accept a client idempotency key yet, so a client retry creates a new order. In production the key
 store would be shared and durable (for example a database table with a unique key), and Order would accept a client
 `Idempotency-Key` and derive the Payment key from it.
+
+## Authentication
+
+Since Phase 6 the business endpoints require an OAuth 2.0 access token from Keycloak (realm `customers`) when `AUTH_ENABLED=true`,
+which the Kubernetes deployment sets. The shared module [`shd_telemetry.auth`](telemetry-lib/src/shd_telemetry/auth.py) provides:
+
+- **Token validation** (FastAPI dependency `current_principal`): `Authorization: Bearer` token, RS256/ES256/PS256 signature with the
+  realm's JSON Web Key Set (cached for 5 minutes, refetched at once for an unknown `kid`, at most every 10 s), `iss`, `aud` (any of
+  `AUTH_AUDIENCES`), `exp`/`iat` with 30 s leeway. Missing or invalid token: **401** with `WWW-Authenticate: Bearer`. The JWKS is
+  fetched from the public issuer URL through the gateway (`AUTH_CA_FILE` = the mkcert CA).
+- **Authorization per endpoint** (`authorize`): realm roles (`realm_access.roles`) or client roles (`resource_access.<client>.roles`).
+  Valid token without the permission: **403**.
+- **Client credentials** (`ClientCredentialsAuth`, an `httpx.Auth`): Order's token for User and Payment, cached until 30 s before it
+  expires and renewed once on a 401. If no token can be obtained, Order answers 503 for that upstream.
+- **Metrics and traces:** `auth.failures{reason, http.response.status_code}` (Prometheus: `auth_failures_total`); the server span gets
+  `enduser.id` and `oauth.client_id`. 401 and 403 are 4xx, so they never count as errors in the RED metrics or the alerts.
+
+| Service | Accepted audience (`aud`) | Permission |
+|---|---|---|
+| order | `shop-api` | `POST /orders`: realm role `orders:write`; `GET /orders[/{id}]`: `orders:read`. A customer's order always belongs to the token's `sub` (`user_id` in the body must be absent or equal); a service account such as the load generator names the `user_id` |
+| user | `shop-api`, `user-service` | `GET /users/{id}`: client role `users:read` of `user-service` (Order, k6), or a customer reading their own profile; `GET /users/me`: customers only |
+| payment | `payment-service` | `POST /payments`: client role `payments:write` of `payment-service` (only Order's service account has it) |
+
+Order calls User and Payment with **its own** token, not the customer's, and adds `X-End-User-Sub: <customer sub>`; User and
+Payment log it as `enduser.id` (audit), trusting it only from an authenticated service account. Probes, `/admin/faults` and `/docs`
+never need a token: they are not routed through the gateway.
+
+| Variable | Meaning |
+|---|---|
+| `AUTH_ENABLED` | `true` enables validation (default off, e.g. for `make compose-up` and the unit tests) |
+| `AUTH_ISSUER`, `AUTH_AUDIENCES`, `AUTH_JWKS_URL`, `AUTH_CA_FILE` | Issuer (`https://sso.localtest.me/realms/customers`), accepted audiences (comma-separated), JWKS URL (default: Keycloak's `<issuer>/protocol/openid-connect/certs`), CA bundle |
+| `OAUTH_TOKEN_URL`, `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_SCOPE` | Client credentials for outbound calls (Order) |
 
 ## Health probes and graceful shutdown
 
@@ -180,8 +215,8 @@ the [standard `OTEL_*` variables](https://opentelemetry.io/docs/specs/otel/confi
 
 ## Status API
 
-`status-api/` is the backend for frontend of the status page ([ADR 0006](../docs/adr/0006-status-api-bff-and-status-page.md),
-[architecture §8](../docs/architecture.md#8-status-api-contract)). It uses `shd_telemetry` like the other services (OTel traces and
+`status-api/` is the backend for frontend of the status page
+([architecture §8](../docs/architecture.md#8-status-api-contract)). It uses `shd_telemetry` like the other services (OTel traces and
 metrics, JSON logs, `/livez`, `/readyz`, graceful shutdown), queries the
 [Prometheus HTTP API](https://prometheus.io/docs/prometheus/latest/querying/api/) (`/api/v1/query`, `/api/v1/query_range`) and the
 [Alertmanager v2 API](https://github.com/prometheus/alertmanager/blob/main/api/v2/openapi.yaml) (`/api/v2/alerts?active=true&silenced=false&inhibited=false`)
@@ -212,7 +247,7 @@ with an instrumented `httpx` client, and serves the result read-only. OpenAPI do
       "rps": [{"t": 1793485800, "v": 2.0}], "error_ratio": [...], "latency_p95_ms": [...]
     },
     "alerts": [],                              // this service's active alerts (Alert, below)
-    "links": {"dashboard": "http://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=payment"},
+    "links": {"dashboard": "https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service=payment"},
     "updated_at": "2026-10-31T22:31:15Z"       // last successful Prometheus read (kept while it is down)
   }],
   "sources": {                                 // health of the two backends
@@ -220,7 +255,7 @@ with an instrumented `httpx` client, and serves the result read-only. OpenAPI do
     "alertmanager": {"status": "unavailable", "error": "alertmanager: ConnectError", "last_success_at": "..."}
   },
   "thresholds": {"error_ratio": 0.05, "latency_p95_ms": 500.0},
-  "links": {"grafana": "http://grafana.localtest.me", "overview_dashboard": "http://grafana.localtest.me/d/shd-overview/service-health-overview"},
+  "links": {"grafana": "https://grafana.localtest.me", "overview_dashboard": "https://grafana.localtest.me/d/shd-overview/service-health-overview"},
   "generated_at": "2026-10-31T22:31:15Z"
 }
 ```
@@ -247,7 +282,7 @@ marks that source `unavailable` instead of failing the request.
 | `CACHE_TTL_SECONDS`, `QUERY_TIMEOUT_SECONDS` | 10, 3 |
 | `ERROR_RATIO_THRESHOLD`, `LATENCY_P95_THRESHOLD_MS` | 0.05, 500 |
 | `SERIES_MINUTES`, `SERIES_STEP_SECONDS` | 30, 60 |
-| `GRAFANA_URL` | `http://grafana.localtest.me` |
+| `GRAFANA_URL` | `https://grafana.localtest.me` |
 
 Run it against the cluster: `kubectl -n observability port-forward svc/kps-prometheus 9090` (and `svc/kps-alertmanager 9093`), then
 `OTEL_TRACES_EXPORTER=none OTEL_METRICS_EXPORTER=none uv run status-api`. Tests (`tests/test_status_api.py`, 37 cases) replace both backends with
@@ -291,66 +326,3 @@ semantics (including readiness while draining), the mapping of upstream failures
 - **uv DNS errors (`failed to lookup address information: Try again`) in a Podman build:** the static musl `uv`
   binary from `ghcr.io/astral-sh/uv` cannot resolve names through the Podman machine's gvproxy DNS. The Dockerfile installs
   the glibc `uv` wheel from PyPI instead.
-
-## Verification evidence (Phase 1)
-
-Captured on macOS arm64 with Podman 6.1.4, docker-compose 5.6.1 and `otelcol-contrib` 0.164.0, using `make lint test` (all tests passed),
-`make compose-up` and `make smoke` (all checks passed). The excerpts are trimmed.
-
-**One order produces one distributed trace.** Spans from the Collector `debug` exporter, summarised:
-
-```text
-service  kind    name                  span id           parent            status  http
-order    Server  POST /orders          58b58fd183adcdcf  -                 Unset   201
-order    Client  GET                   7b21e4f4d744dfd8  58b58fd183adcdcf  Unset   200
-user     Server  GET /users/{user_id}  1755ea8347039651  7b21e4f4d744dfd8  Unset   200
-order    Client  POST                  a132c14d92552932  58b58fd183adcdcf  Unset   201
-payment  Server  POST /payments        609b61c699622a6f  a132c14d92552932  Unset   201
-all spans: Trace ID 2457b0718eec21d3fed13d3db2c863ed
-```
-
-The same `trace_id` appears in the stdout JSON logs of all three services (another run, trace `1d0517…eaa8`):
-
-```json
-{"level": "INFO", "logger": "order_service", "message": "order processed", "service.name": "order", "trace_id": "1d05174840da41fe1fb4e34ff667eaa8", "span_id": "25b20f8cf785cfa5", "order.id": "b7ea21b7aef3", "order.status": "confirmed"}
-{"level": "INFO", "logger": "user_service", "message": "user looked up", "service.name": "user", "trace_id": "1d05174840da41fe1fb4e34ff667eaa8", "span_id": "995d5c1aefbf424b", "user.id": "u-1001", "user.status": "active"}
-{"level": "INFO", "logger": "payment_service", "message": "payment processed", "service.name": "payment", "trace_id": "1d05174840da41fe1fb4e34ff667eaa8", "span_id": "8ac5eebf7f681213", "payment.id": "pay-3f40d09efd8b", "order.id": "b7ea21b7aef3", "payment.status": "approved"}
-```
-
-**Metrics in the Collector output** (stable semconv, plus business metrics with exemplars that link to the trace):
-
-```text
--> Name: http.server.request.duration   -> Unit: s   -> DataType: Histogram
-   http.request.method=GET http.route=/users/{user_id} http.response.status_code=200  Count: 2 Sum: 0.002933
-   ExplicitBounds: 0.005 0.01 0.025 0.05 0.075 0.1 0.25 0.5 0.75 1 2.5 5 7.5 10
--> Name: orders.created        -> Unit: {order}         -> DataType: Sum        Value: 1  Exemplar Trace ID: 4f7c1579645c3278aea46100839dc37b
--> Name: payments.processed    -> Unit: {payment}       -> DataType: Sum        result=approved  Value: 1  Exemplar Trace ID: 4f7c1579645c3278aea46100839dc37b
--> Name: payment.amount        -> Unit: {currency_unit} -> DataType: Histogram  currency=EUR result=approved  Count: 1 Sum: 25.0
-(also http.client.request.duration, http.server.active_requests, http.server.request/response.body.size; no http.server.duration)
-```
-
-**Fault injection** (`PUT payment /admin/faults {"error_rate":1.0}`, then `POST /orders` returns
-`502 {"detail":"payment service returned HTTP 500","upstream":"payment","order_id":"aecbdc446bbb"}`):
-
-```text
-service  kind    name                  status  http  notes
-order    Server  POST /orders          Error   502   error.type=502
-order    Client  GET                   Unset   200
-user     Server  GET /users/{user_id}  Unset   200
-order    Client  POST                  Error   500   error.type=500
-payment  Server  POST /payments        Error   500   event=fault.injected
-all spans: Trace ID 2c210d680d87b4ec128decebb0c7dd55
-```
-
-**Downstream outage:** with Payment stopped, `POST /orders` returns `503 {"detail":"payment service unavailable"}`, while
-Order's `/readyz` stays `200`.
-
-**Graceful shutdown:** `compose stop user-service` while polling every 0.3 s (`SHUTDOWN_DRAIN_SECONDS=2`):
-
-```text
-20:30:08.035 readyz=200 livez=200
-20:30:08.356 readyz=503 livez=200   <- SIGTERM: readiness fails, traffic still served
-...
-20:30:09.978 readyz=503 livez=200
-20:30:10.309 readyz=000 livez=000   <- drain over: listener closed, telemetry flushed, process exits
-```

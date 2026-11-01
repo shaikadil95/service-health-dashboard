@@ -1,0 +1,112 @@
+# promtool unit tests for rules/identity.rules.yaml. Run with `make rules-test`.
+rule_files:
+  - ../rules/identity.rules.yaml
+evaluation_interval: 30s
+
+tests:
+  - name: KeycloakDown when the target is down or gone
+    interval: 30s
+    input_series:
+      - series: 'up{namespace="identity", job="keycloak-service", instance="10.244.0.61:9000"}'
+        values: '1 1 0x10 _x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: KeycloakDown
+        exp_alerts: []
+      # Down for 2 minutes (target still listed, up == 0) ...
+      - eval_time: 3m
+        alertname: KeycloakDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: keycloak
+              namespace: identity
+            exp_annotations:
+              summary: "Keycloak is down: nobody can sign in"
+              description: "Prometheus has not scraped a healthy Keycloak instance for more than 2 minutes. Customers cannot sign in to the shop, engineers cannot open the monitoring UIs, and services cannot get new client-credentials tokens."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/KeycloakDown.md
+              dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview
+      # ... and still firing after the target disappeared (scaled to 0).
+      - eval_time: 10m
+        alertname: KeycloakDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: keycloak
+              namespace: identity
+            exp_annotations:
+              summary: "Keycloak is down: nobody can sign in"
+              description: "Prometheus has not scraped a healthy Keycloak instance for more than 2 minutes. Customers cannot sign in to the shop, engineers cannot open the monitoring UIs, and services cannot get new client-credentials tokens."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/KeycloakDown.md
+              dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview
+
+  - name: KeycloakDown stays silent while Keycloak is up
+    interval: 30s
+    input_series:
+      - series: 'up{namespace="identity", job="keycloak-service", instance="10.244.0.61:9000"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: KeycloakDown
+        exp_alerts: []
+
+  # ops: 1 login/s, half of them failing (fires). customers: 1 login/s, 1 in 10 failing (silent).
+  # A realm with only a few attempts, all failing, stays silent (minimum volume).
+  - name: LoginFailureSpike above 30 % with enough attempts
+    interval: 30s
+    input_series:
+      - series: 'keycloak_user_events_total{namespace="identity", realm="ops", event="login"}'
+        values: '0+15x30'
+      - series: 'keycloak_user_events_total{namespace="identity", realm="ops", event="login", error="invalid_user_credentials"}'
+        values: '0+15x30'
+      - series: 'keycloak_user_events_total{namespace="identity", realm="customers", event="login"}'
+        values: '0+27x30'
+      - series: 'keycloak_user_events_total{namespace="identity", realm="customers", event="login", error="invalid_user_credentials"}'
+        values: '0+3x30'
+      - series: 'keycloak_user_events_total{namespace="identity", realm="quiet", event="login", error="invalid_user_credentials"}'
+        values: '0 1 2 2x27'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: LoginFailureSpike
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: LoginFailureSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: keycloak
+              realm: ops
+            exp_annotations:
+              summary: "50% of logins in realm ops fail"
+              description: "More than 30 % of the login attempts in the Keycloak realm ops have failed over the last 5 minutes, for more than 5 minutes: password guessing, or a broken client or identity configuration."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/LoginFailureSpike.md
+              dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview
+
+  # Token requests between 0.5 s and 1 s: p95 0.975 s.
+  - name: TokenLatencyHigh above 500 ms; other endpoints do not count
+    interval: 30s
+    input_series:
+      - series: 'http_server_requests_seconds_bucket{namespace="identity", uri="/realms/{realm}/protocol/{protocol}/token", le="0.5"}'
+        values: '0x30'
+      - series: 'http_server_requests_seconds_bucket{namespace="identity", uri="/realms/{realm}/protocol/{protocol}/token", le="1.0"}'
+        values: '0+30x30'
+      - series: 'http_server_requests_seconds_bucket{namespace="identity", uri="/realms/{realm}/protocol/{protocol}/token", le="+Inf"}'
+        values: '0+30x30'
+      # A slow admin console page is not a token problem.
+      - series: 'http_server_requests_seconds_bucket{namespace="identity", uri="/admin/{realm}/console", le="+Inf"}'
+        values: '0+30x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: TokenLatencyHigh
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: TokenLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: keycloak
+            exp_annotations:
+              summary: "Keycloak's token endpoint is slow: p95 975ms"
+              description: "The 95th percentile duration of token requests (code exchange, refresh, client credentials) has been above 500 ms over the last 5 minutes, for more than 5 minutes. Logins and service-to-service calls with expired tokens are slow."
+              runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/TokenLatencyHigh.md
+              dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview

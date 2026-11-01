@@ -2,6 +2,12 @@
 image:
   repository: localhost/shd/payment-service
 
+# Only tokens for the payment-service audience with the payments:write client role (order's
+# service account).
+auth:
+  enabled: true
+  audiences: [payment-service]
+
 networkPolicy:
   ingressFrom:
     - podSelector:

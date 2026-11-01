@@ -87,6 +87,10 @@ fi
 
 if need helmfile; then ok "$(helmfile --version | head -1)"; fi
 
+# Phase 6: the local CA for https://*.localtest.me (deploy/scripts/mkcert-ca.sh). `mkcert -install`
+# (trusting it in browsers) is a one-time manual step and not checked here.
+if need mkcert; then ok "mkcert $(mkcert -version 2>/dev/null) (CAROOT $(mkcert -CAROOT))"; fi
+
 if ((fail)); then
   echo "Prerequisites missing; see deploy/README.md." >&2
   exit 1

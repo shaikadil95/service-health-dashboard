@@ -10,9 +10,9 @@ A **lightweight observability solution** for three backend services (User, Order
 It is an architecture exercise that focuses on **design decisions and trade-offs**. It is also a demo you can reproduce on a laptop:
 `make up` → break a service → see red status → receive an email.
 
-> **Status: Phase 4 (visualization and Status API).** The design, the three instrumented services, the kind platform, the telemetry pipeline,
-> Grafana with linked signals and two dashboards, the Status API and the status page are in place. Alert rules and email arrive in Phase 5.
-> See the [roadmap](docs/roadmap.md).
+> **Status: Phase 6 (identity and SSO) complete.** The design, the three instrumented services, the kind platform, the telemetry pipeline,
+> Grafana with linked signals, the Status API and status page, promtool-tested alerts with email to Mailpit and runbooks, and
+> HTTPS with Keycloak single sign-on, JWT-protected APIs and a customer shop are in place. CI/CD (Phase 7) is a placeholder.
 
 ![Status page during an injected latency fault](docs/screenshots/status-page.png)
 
@@ -21,20 +21,20 @@ It is an architecture exercise that focuses on **design decisions and trade-offs
 | Document | What it covers |
 |---|---|
 | [Architecture](docs/architecture.md) | **The main deliverable.** Goals, the architecture, the five main data flows, trade-offs, probe design, alerting, the Status API contract, networking, security, and how the design evolves for production |
-| [Architecture Decision Records](docs/adr/README.md) | One MADR document for each key decision (ADRs 0001–0010) |
 | [Diagrams](docs/diagrams/) | Mermaid sources (`.mmd`) and rendered SVG files |
-| [Roadmap](docs/roadmap.md) | Phases 0–7 with scope and exit criteria |
-| [Services](services/README.md) | Phase 1: endpoints, probes, fault injection, telemetry. Phase 4: the [Status API contract](services/README.md#status-api) |
-| [Web](web/README.md) | Phase 4: pnpm monorepo with the shadcn/ui status page |
-| [Local platform](deploy/README.md) | Phase 2: kind, Envoy Gateway, Helm chart, NetworkPolicies, CoreDNS, troubleshooting. Phase 3: telemetry pipeline and storage (Collector, Prometheus, Loki, Tempo, Grafana, blackbox, k6). Phase 4: Grafana correlations and dashboards, status page routing, evidence |
-| [CI/CD placeholder](.github/workflows/README.md) | Planned CI and GitOps CD |
+| [Runbooks](docs/runbooks/README.md) | One runbook per alert: impact, triage queries, common causes, remediation |
+| [Services](services/README.md) | Endpoints, probes, fault injection, telemetry, [authentication](services/README.md#authentication), the [Status API contract](services/README.md#status-api) |
+| [Web](web/README.md) | pnpm monorepo with the shadcn/ui status page and customer shop |
+| [Local platform](deploy/README.md) | kind, Envoy Gateway, Helm charts, NetworkPolicies, CoreDNS; telemetry pipeline and storage; dashboards; [alerting](deploy/README.md#alerting-and-notification-phase-5); [HTTPS and SSO](deploy/README.md#identity-and-single-sign-on-phase-6); `make verify`, `make demo`, troubleshooting |
+| [Load generator](loadgen/README.md) | k6 background traffic with a client-credentials token |
 
 ## Architecture overview
 
 ```mermaid
 flowchart LR
   client(["Browser / k6"])
-  gw["Envoy Gateway<br/>*.localtest.me"]
+  gw["Envoy Gateway<br/>*.localtest.me (HTTPS, SSO)"]
+  kc["Keycloak<br/>identity namespace"]
 
   subgraph apps["apps namespace"]
     user["User svc"]
@@ -55,7 +55,8 @@ flowchart LR
   end
 
   client --> gw
-  gw --> order & user & pay
+  gw -- "OIDC / JWT" --> kc
+  gw --> order & user
   order --> user
   order --> pay
   gw --> graf & sapi
@@ -80,27 +81,27 @@ The [architecture document](docs/architecture.md) explains each flow.
 
 ## Tech stack
 
-| Concern | Choice | ADR |
+| Concern | Choice | Why |
 |---|---|---|
-| Services | Python 3.12, FastAPI | — |
-| Instrumentation | OpenTelemetry SDK (OTLP) | [0001](docs/adr/0001-opentelemetry-for-instrumentation.md) |
-| Collection | OpenTelemetry Collector (contrib) as a DaemonSet | [0002](docs/adr/0002-collector-topology.md) |
-| Traces | Grafana Tempo with the metrics-generator | [0003](docs/adr/0003-tempo-vs-jaeger.md) |
-| Metrics | Prometheus (kube-prometheus-stack): OTLP push and scrape, kube-state-metrics, blackbox exporter | [0004](docs/adr/0004-prometheus-otlp-push-and-scrape.md) |
-| Logs | Grafana Loki | [0005](docs/adr/0005-loki-for-logs.md) |
-| Dashboards | Grafana (dashboards as code) | [0004](docs/adr/0004-prometheus-otlp-push-and-scrape.md) |
-| Status view | Status API (FastAPI backend for frontend) and a status page in React, TypeScript, Vite, Tailwind and shadcn/ui | [0006](docs/adr/0006-status-api-bff-and-status-page.md) |
-| Alerting | Prometheus rules → Alertmanager → email (Mailpit) | [0007](docs/adr/0007-alertmanager-routing-and-mailpit.md) |
-| Edge | Envoy Gateway (Kubernetes Gateway API) on `*.localtest.me` | [0008](docs/adr/0008-envoy-gateway-as-edge.md) |
-| Identity (Phase 6) | Keycloak through the Keycloak Operator (`customers` and `ops` realms), Envoy Gateway OIDC and JWT | [0009](docs/adr/0009-keycloak-and-sso.md) |
-| Runtime and deployment | kind on Docker or Podman, Helm 4, helmfile, Makefile | [0010](docs/adr/0010-local-runtime-kind.md) |
-| Load | k6 | — |
+| Services | Python 3.12, FastAPI | Small, readable services with first-class OpenTelemetry auto-instrumentation |
+| Instrumentation | OpenTelemetry SDK (OTLP) | One vendor-neutral API for traces, metrics and logs |
+| Collection | OpenTelemetry Collector (contrib) as a DaemonSet | Node-local agent that adds Kubernetes metadata and tails pod logs |
+| Traces | Grafana Tempo with the metrics-generator | Cheap object-storage design, TraceQL, span metrics and the service graph |
+| Metrics | Prometheus (kube-prometheus-stack): OTLP push and scrape, kube-state-metrics, blackbox exporter | The Kubernetes standard; native OTLP receiver plus target health and synthetic checks |
+| Logs | Grafana Loki | Indexes labels only, so it stays light; same label model as Prometheus |
+| Dashboards | Grafana (dashboards as code) | Linked signals: metric → exemplar trace → logs |
+| Status view | Status API (FastAPI backend for frontend) and a status page in React, TypeScript, Vite, Tailwind and shadcn/ui | A small, stable UP / DEGRADED / DOWN contract for people who do not read PromQL |
+| Alerting | Prometheus rules → Alertmanager → email (Mailpit) | Grouping, inhibition, silences and severity routing; the receiver is swappable |
+| Edge | Envoy Gateway (Kubernetes Gateway API) on `*.localtest.me` | Gateway API standard with built-in OIDC and JWT policies |
+| Identity (Phase 6) | Keycloak through the Keycloak Operator (`customers` and `ops` realms), Envoy Gateway OIDC and JWT | Open-source OIDC provider; realms keep customer and staff identities apart |
+| Runtime and deployment | kind on Docker or Podman, Helm 4, helmfile, Makefile | Conformant Kubernetes on a laptop, one command to reproduce |
+| Load | k6 | Steady, scriptable background traffic |
 
 ## Roadmap
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **0** Foundations | Architecture document, ADRs, diagrams, repository setup | The design can be reviewed as the interview deliverable |
+| **0** Foundations | Architecture document, diagrams, repository setup | The design can be reviewed as the interview deliverable |
 | **1** Services | FastAPI services, OTel, probes, fault injection, tests, compose | Tests pass. One order produces one distributed trace. |
 | **2** Platform | kind, Makefile, Helm chart, Envoy Gateway, CoreDNS rewrite, NetworkPolicies | `make up`. `api.localtest.me` works from the host and from a pod. Readiness behaviour verified. |
 | **3** Telemetry | Collector, Prometheus, Loki, Tempo, blackbox exporter, k6 | All three signals can be queried in Grafana, and the service graph is visible |
@@ -109,25 +110,23 @@ The [architecture document](docs/architecture.md) explains each flow.
 | **6** Identity | Keycloak, HTTPS, OIDC and JWT, customer shop page | Customer login and order. SSO for engineers. `401` without a token. |
 | **7** CI/CD | Placeholder: GitHub Actions CI and Argo CD | — |
 
-Full details are in [docs/roadmap.md](docs/roadmap.md).
-
 ## Local URLs
 
-These are available **from Phase 2 onwards**. Each URL appears in the phase that adds its component. `*.localtest.me` resolves to `127.0.0.1` through public DNS (if your resolver filters that answer, use `/etc/hosts`; see [deploy/README.md](deploy/README.md#troubleshooting)).
+All hosts use **HTTPS** with a certificate from a local [mkcert](https://github.com/FiloSottile/mkcert) CA (`make up` creates it if needed).
+Trust it once with `mkcert -install`, or use `make browser` (a separate Chrome profile that accepts the CA without installing it).
+`*.localtest.me` resolves to `127.0.0.1` through public DNS; if your resolver filters that answer, see
+[deploy/README.md](deploy/README.md#dns-blocked-on-your-network). Demo logins: `make sso-users`.
 
-| URL | What | From phase |
+| URL | What | Who |
 |---|---|---|
-| http://api.localtest.me | User, Order and Payment APIs | 2 |
-| http://grafana.localtest.me | Grafana | 3 |
-| http://prometheus.localtest.me | Prometheus | 3 |
-| http://alertmanager.localtest.me | Alertmanager | 3 |
-| http://status.localtest.me | Status page; Status API on `/api` (e.g. `/api/v1/services`) | 4 |
-| http://grafana.localtest.me/d/shd-overview | Grafana: Service Health Overview (and Service Detail) | 4 |
-| http://mail.localtest.me | Mailpit (on-call inbox) | 5 |
-| https://sso.localtest.me | Keycloak | 6 |
-| https://shop.localtest.me | Customer shop page | 6 |
-
-From Phase 6, every URL uses HTTPS.
+| https://shop.localtest.me | Customer shop: sign in, place and list orders | `customers` realm (demo `customer`, or register) |
+| https://api.localtest.me | Order and User APIs (bearer token, audience `shop-api`) | `customers` realm tokens |
+| https://status.localtest.me | Status page; Status API on `/api` | `ops` realm, any engineer |
+| https://grafana.localtest.me | Grafana; `/d/shd-overview` and `/d/shd-service-detail` | `ops` realm (sre → Admin, dev → Editor, viewer → Viewer) or the local admin |
+| https://prometheus.localtest.me | Prometheus | `ops` realm, group `sre` |
+| https://alertmanager.localtest.me | Alertmanager | `ops` realm, group `sre` |
+| https://mail.localtest.me | Mailpit, the on-call inbox | `ops` realm, group `sre` |
+| https://sso.localtest.me | Keycloak (login, admin console) | — |
 
 ## Prerequisites
 
@@ -138,31 +137,39 @@ From Phase 6, every URL uses HTTPS.
 - [helmfile](https://helmfile.readthedocs.io/) and the [helm-diff](https://github.com/databus23/helm-diff) plugin
 - Phase 1 local run: [uv](https://docs.astral.sh/uv/) and a compose provider (`docker compose`, or `podman compose` with `docker-compose` installed)
 - Optional: [k6](https://grafana.com/docs/k6/latest/) to run `loadgen/scripts/orders.js` from the host (Phase 3 runs it in the cluster)
-- Frontend development only (Phase 4, `make web-check`): Node.js ≥ 20.19 and [pnpm](https://pnpm.io/) 12. The images build without them.
-- Later phases: [mkcert](https://github.com/FiloSottile/mkcert) (Phase 6)
+- Frontend development only (`make web-check`): Node.js ≥ 20.19 and [pnpm](https://pnpm.io/) 12. The images build without them.
+- [mkcert](https://github.com/FiloSottile/mkcert) for the local CA of `https://*.localtest.me`
 
 ## Getting started
 
-**Kubernetes (Phases 2–4):** one command creates a kind cluster, installs Envoy Gateway, the observability stack
-(OTel Collector, Prometheus, Alertmanager, Grafana with its dashboards, Loki, Tempo, blackbox exporter), the three services,
-the Status API and the status page, and starts a k6 load generator:
+**Kubernetes:** one command creates a kind cluster, installs Envoy Gateway with HTTPS, cert-manager, the observability stack
+(OTel Collector, Prometheus, Alertmanager, Grafana, Loki, Tempo, blackbox exporter, Mailpit), Keycloak with its operator and
+PostgreSQL, the three services, the Status API, the status page and the shop, and starts a k6 load generator:
 
 ```bash
-make prereqs        # container engine (Podman must be rootful), kind, kubectl, helm 4, helmfile, helm-diff
-make up             # kind cluster + images + helmfile apply + CoreDNS rewrite (first run: ~15 min of image pulls)
-curl -s -X POST http://api.localtest.me/orders -H 'content-type: application/json' \
-  -d '{"user_id":"u-1001","items":[{"sku":"book","quantity":2,"unit_price":"12.50"}],"currency":"EUR"}'
-curl -s http://api.localtest.me/users/u-1001
-open http://status.localtest.me   # status page; curl http://status.localtest.me/api/v1/services for the JSON
-make verify         # automated checks: routes, NetworkPolicy, readiness, metrics/logs/traces, dashboards, status page
-make grafana-password  # http://grafana.localtest.me, user admin
-make load-stop      # or load-start: the k6 background traffic
+make prereqs        # container engine (Podman must be rootful), kind, kubectl, helm 4, helmfile, helm-diff, mkcert
+make up             # kind cluster + images + local CA + Keycloak Operator + helmfile apply + CoreDNS rewrite (first run: ~15-20 min)
+make sso-users      # demo logins (generated per cluster)
+make browser        # optional: Chrome profile with *.localtest.me -> 127.0.0.1 and the mkcert CA accepted
+open https://shop.localtest.me      # sign in as "customer", place an order
+open https://status.localtest.me    # sign in as "sre": one login for status, Prometheus, Alertmanager and Mailpit
+make verify         # automated checks of every phase (platform, telemetry, dashboards, alerting, identity)
+make demo           # failure scenarios: break a service -> alert -> email in Mailpit -> status page -> recovery (~30 min)
 make down
 ```
 
-See [deploy/README.md](deploy/README.md) for the platform design, make targets and troubleshooting
-(for example when your DNS resolver does not return `127.0.0.1` for `*.localtest.me`, or Podman on macOS).
-`scripts/demo.sh` with the failure scenarios arrives in Phase 5.
+The API needs a token; for example with the load generator's client credentials:
+
+```bash
+CA="$(mkcert -CAROOT)/rootCA.pem"
+SECRET=$(kubectl --context kind-shd -n loadgen get secret loadgen-client -o jsonpath='{.data.client-secret}' | base64 -d)
+TOKEN=$(curl -s --cacert "$CA" -u "loadgen:$SECRET" -d grant_type=client_credentials \
+  https://sso.localtest.me/realms/customers/protocol/openid-connect/token | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+curl -s --cacert "$CA" -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' https://api.localtest.me/orders \
+  -d '{"user_id":"u-1001","items":[{"sku":"book","quantity":2,"unit_price":"12.50"}],"currency":"EUR"}'
+```
+
+See [deploy/README.md](deploy/README.md) for the platform design, make targets and troubleshooting.
 
 **Services only (Phase 1):** run the three instrumented services and an OpenTelemetry Collector locally, without Kubernetes:
 
@@ -177,7 +184,7 @@ See [services/README.md](services/README.md) for endpoints, probes, fault inject
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The project uses Conventional Commits and one pull request per phase.
+The project uses [Conventional Commits](https://www.conventionalcommits.org/) and one branch per phase. Run `make lint test` (and `make web-check`, `make lint-charts`) before you commit.
 
 ## License
 

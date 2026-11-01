@@ -1,0 +1,53 @@
+# Workload causes (warning, team mailbox): pods of the apps namespace that are not ready or crash
+# loop. kube-state-metrics exposes the pod label app.kubernetes.io/name (metricLabelsAllowlist in
+# deploy/values/kube-prometheus-stack.yaml), which becomes the `service` label.
+#
+# kube-prometheus-stack's generic KubePodNotReady (15 m) and KubePodCrashLooping (15 m) also cover
+# these pods; Alertmanager inhibits them for the same pod while the faster rules below fire.
+groups:
+  - name: shd-kubernetes.recording
+    interval: 30s
+    rules:
+      - record: namespace_pod:shd_service:info
+        expr: |
+          label_replace(
+            max by (namespace, pod, label_app_kubernetes_io_name) (kube_pod_labels{namespace="apps", label_app_kubernetes_io_name!=""}),
+            "service", "$1", "label_app_kubernetes_io_name", "(.+)"
+          )
+
+  - name: shd-kubernetes.alerts
+    interval: 30s
+    rules:
+      - alert: PodNotReady
+        expr: |
+          (max by (namespace, pod) (kube_pod_status_ready{namespace="apps", condition="false"}) == 1)
+          * on (namespace, pod) group_left (service) namespace_pod:shd_service:info
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pod {{ $labels.pod }} of {{ $labels.service }} is not ready"
+          description: >-
+            {{ $labels.namespace }}/{{ $labels.pod }} has failed its readiness probe for more than
+            2 minutes. It receives no traffic but is not restarted (readiness never restarts a pod).
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/PodNotReady.md
+          dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service={{ $labels.service }}
+
+      - alert: PodCrashLooping
+        expr: |
+          (
+            max by (namespace, pod, container) (
+              max_over_time(kube_pod_container_status_waiting_reason{namespace="apps", reason="CrashLoopBackOff"}[5m])
+            ) >= 1
+          )
+          * on (namespace, pod) group_left (service) namespace_pod:shd_service:info
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.container }} of {{ $labels.service }} is crash looping"
+          description: >-
+            {{ $labels.namespace }}/{{ $labels.pod }} ({{ $labels.container }}) has been in
+            CrashLoopBackOff during the last 5 minutes, for more than 5 minutes.
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/PodCrashLooping.md
+          dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service={{ $labels.service }}

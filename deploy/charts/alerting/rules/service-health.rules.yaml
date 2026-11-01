@@ -1,0 +1,145 @@
+# Service health: availability, errors and latency of the User, Order and Payment services.
+# Plain Prometheus rule file: `promtool check rules` and `promtool test rules` (../tests) read it
+# directly, and the chart wraps it in a PrometheusRule (templates/prometheusrules.yaml).
+#
+# Thresholds match the Status API (deploy/values/status-api.yaml): 5xx ratio > 5 % and p95 > 500 ms
+# over 5 minutes, on the same series (OTLP http.server.request.duration, /admin excluded), so the
+# status page and the on-call email never disagree. 401/403 are 4xx and never count as errors here.
+groups:
+  - name: shd-service-health.recording
+    interval: 30s
+    rules:
+      # Requests and 5xx per service. label_replace turns the OTLP resource label service_name into
+      # the label `service` that the probes, the alerts and Alertmanager routing use.
+      - record: service:http_server_requests:rate5m
+        expr: |
+          sum by (service) (
+            label_replace(
+              rate(http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name=~"user|order|payment", http_route!~"/admin/.*"}[5m]),
+              "service", "$1", "service_name", "(.+)"
+            )
+          )
+      - record: service:http_server_errors:rate5m
+        expr: |
+          sum by (service) (
+            label_replace(
+              rate(http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name=~"user|order|payment", http_route!~"/admin/.*", http_response_status_code=~"5.."}[5m]),
+              "service", "$1", "service_name", "(.+)"
+            )
+          )
+      # "or ... * 0": 0 instead of no result when a service has traffic but no 5xx.
+      - record: service:http_server_errors:ratio_rate5m
+        expr: |
+          (service:http_server_errors:rate5m or service:http_server_requests:rate5m * 0)
+          / service:http_server_requests:rate5m
+      - record: service:http_server_requests:rate1h
+        expr: |
+          sum by (service) (
+            label_replace(
+              rate(http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name=~"user|order|payment", http_route!~"/admin/.*"}[1h]),
+              "service", "$1", "service_name", "(.+)"
+            )
+          )
+      - record: service:http_server_errors:rate1h
+        expr: |
+          sum by (service) (
+            label_replace(
+              rate(http_server_request_duration_seconds_count{k8s_namespace_name="apps", service_name=~"user|order|payment", http_route!~"/admin/.*", http_response_status_code=~"5.."}[1h]),
+              "service", "$1", "service_name", "(.+)"
+            )
+          )
+      - record: service:http_server_errors:ratio_rate1h
+        expr: |
+          (service:http_server_errors:rate1h or service:http_server_requests:rate1h * 0)
+          / service:http_server_requests:rate1h
+      - record: service:http_server_request_duration_seconds:p95_rate5m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (service, le) (
+              label_replace(
+                rate(http_server_request_duration_seconds_bucket{k8s_namespace_name="apps", service_name=~"user|order|payment", http_route!~"/admin/.*"}[5m]),
+                "service", "$1", "service_name", "(.+)"
+              )
+            )
+          )
+
+  - name: shd-service-health.alerts
+    interval: 30s
+    rules:
+      # Black-box availability: the blackbox exporter GETs each service's /readyz through its
+      # Service. 0 means no ready endpoint answered (scaled to 0, all pods not ready, crash).
+      - alert: ServiceDown
+        expr: min by (namespace, service) (probe_success{job="blackbox-readyz"}) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is down: its readiness probe fails"
+          description: >-
+            The synthetic check of http://{{ $labels.service }}.{{ $labels.namespace }}.svc.cluster.local/readyz
+            has failed for more than 1 minute: no ready pod answers behind the Service, so every request
+            to {{ $labels.service }} fails.
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/ServiceDown.md
+          dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service={{ $labels.service }}
+
+      - alert: HighErrorRate
+        expr: service:http_server_errors:ratio_rate5m > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} returns 5xx for {{ $value | humanizePercentage }} of requests"
+          description: >-
+            More than 5 % of the requests to {{ $labels.service }} have failed with a 5xx status over
+            the last 5 minutes, for more than 5 minutes (current: {{ $value | humanizePercentage }}).
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/HighErrorRate.md
+          dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service={{ $labels.service }}
+
+      - alert: HighLatencyP95
+        expr: service:http_server_request_duration_seconds:p95_rate5m > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} is slow: p95 {{ $value | humanizeDuration }}"
+          description: >-
+            The 95th percentile response time of {{ $labels.service }} has been above 500 ms over
+            the last 5 minutes, for more than 5 minutes (current: {{ $value | humanizeDuration }}).
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/HighLatencyP95.md
+          dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service={{ $labels.service }}
+
+      # Payment is on the checkout path: above 1 s customers abandon orders, so it pages.
+      # Alertmanager inhibits the warning above while this one fires.
+      - alert: HighLatencyP95
+        expr: service:http_server_request_duration_seconds:p95_rate5m{service="payment"} > 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is very slow: p95 {{ $value | humanizeDuration }}"
+          description: >-
+            The 95th percentile response time of payment has been above 1 s over the last 5 minutes,
+            for more than 5 minutes (current: {{ $value | humanizeDuration }}). Checkout is affected.
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/HighLatencyP95.md
+          dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service={{ $labels.service }}
+
+      # SLO: 99.5 % of order requests succeed (non-5xx) over 30 days, an error budget of 0.5 %.
+      # Fast-burn page from the SRE Workbook: burn rate 14.4 over 1 h and over 5 min, i.e. 2 % of
+      # the monthly budget spent in one hour. https://sre.google/workbook/alerting-on-slos/
+      - alert: ErrorBudgetBurn
+        expr: |
+          service:http_server_errors:ratio_rate1h{service="order"} > (14.4 * 0.005)
+          and
+          service:http_server_errors:ratio_rate5m{service="order"} > (14.4 * 0.005)
+        for: 2m
+        labels:
+          severity: critical
+          slo: order-availability-99.5
+        annotations:
+          summary: "order is burning its error budget 14.4x too fast"
+          description: >-
+            The 5xx ratio of order is above 7.2 % (14.4 times the 0.5 % budget of the 99.5 %
+            availability SLO) over both the last hour and the last 5 minutes. At this rate the
+            30-day error budget is gone in about 2 days.
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/ErrorBudgetBurn.md
+          dashboard_url: https://grafana.localtest.me/d/shd-service-detail/service-detail?var-service={{ $labels.service }}

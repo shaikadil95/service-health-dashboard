@@ -65,15 +65,20 @@ def build_clients(
     settings: UpstreamSettings,
     user_transport: httpx.AsyncBaseTransport | None = None,
     payment_transport: httpx.AsyncBaseTransport | None = None,
+    auth: httpx.Auth | None = None,
 ) -> tuple[httpx.AsyncClient, httpx.AsyncClient]:
+    """``auth``: client credentials for both upstreams (one token, audiences user-service and
+    payment-service), or ``None`` when authentication is off."""
     user_client = httpx.AsyncClient(
         base_url=settings.user_url,
+        auth=auth,
         timeout=httpx.Timeout(settings.user_timeout, connect=settings.connect_timeout),
         # GET is idempotent: one retry, and httpx only retries failed connection attempts.
         transport=user_transport or httpx.AsyncHTTPTransport(retries=1),
     )
     payment_client = httpx.AsyncClient(
         base_url=settings.payment_url,
+        auth=auth,
         timeout=httpx.Timeout(settings.payment_timeout, connect=settings.connect_timeout),
         # No automatic retries for the non-idempotent POST; an Idempotency-Key is sent instead
         # so that a later reconciliation can retry safely.

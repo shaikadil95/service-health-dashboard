@@ -1,0 +1,74 @@
+# Watching the watchers: the telemetry pipeline (Collector, Loki, Tempo, blackbox exporter) and the
+# alerting pipeline itself (Watchdog). Pushed application metrics have no `up` series, so a broken
+# pipeline would otherwise look like a quiet, healthy system.
+groups:
+  - name: shd-pipeline.alerts
+    interval: 30s
+    rules:
+      - alert: TelemetryPipelineDown
+        expr: |
+          up{namespace="observability", job=~"observability/otel-collector-agent|observability/loki|tempo|blackbox-exporter"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: telemetry-pipeline
+          reason: target-down
+        annotations:
+          summary: "Telemetry pipeline component {{ $labels.job }} is down"
+          description: >-
+            Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }}) for more than
+            5 minutes. Metrics, logs, traces or probe results may be missing, so dashboards and
+            alerts can look healthier than the services are.
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/TelemetryPipelineDown.md
+          dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview
+
+      - alert: TelemetryPipelineDown
+        expr: absent(up{job="observability/otel-collector-agent"} == 1)
+        for: 5m
+        labels:
+          severity: warning
+          service: telemetry-pipeline
+          reason: no-collector
+        annotations:
+          summary: "No OpenTelemetry Collector agent is up"
+          description: >-
+            No Collector agent has been scraped successfully for more than 5 minutes (DaemonSet
+            missing, pods not running, or the PodMonitor broken). No new traces, metrics or logs of
+            the services arrive.
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/TelemetryPipelineDown.md
+          dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview
+
+      - alert: TelemetryPipelineDown
+        expr: |
+          sum by (exporter) (
+            rate({__name__=~"otelcol_exporter_send_failed_(spans|metric_points|log_records)(_total)?", job="observability/otel-collector-agent"}[5m])
+          ) > 0
+        for: 10m
+        labels:
+          severity: warning
+          service: telemetry-pipeline
+          reason: export-failures
+        annotations:
+          summary: "Collector exporter {{ $labels.exporter }} keeps failing"
+          description: >-
+            The Collector has been failing to send data through {{ $labels.exporter }} for more than
+            10 minutes ({{ $value | humanize }} items/s dropped after retries). The backend is down,
+            unreachable or rejecting the data.
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/TelemetryPipelineDown.md
+          dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview
+
+      # Dead man's switch: always firing. Alertmanager sends it to a heartbeat receiver; in
+      # production an external service (e.g. healthchecks.io, PagerDuty heartbeat) pages when the
+      # heartbeat stops, which means Prometheus, Alertmanager or the path between them is broken.
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+          service: alerting-pipeline
+        annotations:
+          summary: "Alerting pipeline heartbeat (always firing)"
+          description: >-
+            This alert is always firing. If it stops arriving at the heartbeat receiver, the
+            alerting pipeline (Prometheus rule evaluation, Prometheus -> Alertmanager, or
+            Alertmanager notifications) is broken.
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/Watchdog.md
