@@ -102,6 +102,8 @@ class Principal:
     client_roles: dict[str, frozenset[str]] = field(default_factory=dict)
     name: str | None = None
     email: str | None = None
+    # Keycloak group names (the ``groups`` claim of the ops realm's group membership mapper).
+    groups: frozenset[str] = frozenset()
     authenticated: bool = True
 
     @property
@@ -131,6 +133,7 @@ class Principal:
             },
             name=claims.get("name"),
             email=claims.get("email"),
+            groups=frozenset(g for g in claims.get("groups") or [] if isinstance(g, str)),
         )
 
 

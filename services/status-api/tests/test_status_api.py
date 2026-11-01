@@ -11,7 +11,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from shd_telemetry.testing import in_memory_telemetry
+from shd_telemetry.testing import TestIssuer, in_memory_telemetry
 from status_api.app import create_app
 from status_api.config import Settings
 from status_api.models import Alert, Metrics, Status
@@ -467,4 +467,64 @@ def test_settings_reject_names_that_could_inject_promql(name):
 
 def test_openapi_lists_the_v1_contract(client):
     paths = json.loads(client.get("/openapi.json").text)["paths"]
-    assert {"/api/v1/services", "/api/v1/services/{name}", "/api/v1/alerts"} <= set(paths)
+    assert {"/api/v1/services", "/api/v1/services/{name}", "/api/v1/alerts", "/api/v1/me"} <= set(
+        paths
+    )
+
+
+# --- Signed-in engineer (/api/v1/me) -----------------------------------------------------------
+
+
+@pytest.fixture
+def ops_issuer():
+    return TestIssuer(issuer="https://sso.test/realms/ops")
+
+
+@pytest.fixture
+def auth_client(backends, ops_issuer):
+    telemetry = in_memory_telemetry("status-api").telemetry
+    app = create_app(
+        telemetry,
+        SETTINGS,
+        transport=httpx.MockTransport(backends.handler),
+        auth=ops_issuer.settings("ops-gateway"),
+        jwks_transport=ops_issuer.jwks_transport,
+    )
+    with TestClient(app) as c:
+        yield c
+
+
+def test_me_returns_the_engineer_from_the_forwarded_token(auth_client, ops_issuer):
+    token = ops_issuer.token(
+        sub="u-sre",
+        aud="ops-gateway",
+        preferred_username="sre",
+        name="Sam Reliability",
+        email="sre@shd.test",
+        groups=["sre"],
+    )
+    r = auth_client.get("/api/v1/me", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    assert r.json() == {
+        "username": "sre",
+        "name": "Sam Reliability",
+        "email": "sre@shd.test",
+        "groups": ["sre"],
+    }
+    assert r.headers["Cache-Control"] == "no-store"
+
+
+def test_me_rejects_missing_and_foreign_tokens(auth_client, ops_issuer):
+    assert auth_client.get("/api/v1/me").status_code == 401
+    shop_token = ops_issuer.token(aud="shop-api", groups=["sre"])
+    r = auth_client.get("/api/v1/me", headers={"Authorization": f"Bearer {shop_token}"})
+    assert r.status_code == 401
+
+
+def test_status_endpoints_do_not_need_a_token(auth_client):
+    # The gateway authenticates them; only /me reads the token.
+    assert auth_client.get("/api/v1/services").status_code == 200
+
+
+def test_me_without_auth_configured_is_404(client):
+    assert client.get("/api/v1/me").status_code == 404

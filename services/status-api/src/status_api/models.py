@@ -106,3 +106,12 @@ class AlertsResponse(BaseModel):
     alerts: list[Alert]
     source: Source
     generated_at: datetime
+
+
+class Me(BaseModel):
+    """The signed-in engineer (``GET /api/v1/me``)."""
+
+    username: str
+    name: str | None = None
+    email: str | None = None
+    groups: list[str] = Field(default_factory=list, description="Keycloak groups: sre, dev, viewer")
