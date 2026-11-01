@@ -6,7 +6,7 @@
 #   4. NetworkPolicy: a pod outside apps cannot reach payment or user directly.
 #   5. Readiness: forcing ready=false removes the pod from the EndpointSlice without a restart.
 # Since Phase 6 the API is HTTPS only and needs a bearer token: the checks use the load generator's
-# client-credentials token (deploy/scripts/lib/edge.sh).
+# client-credentials token (deploy/scripts/edge-lib.sh).
 set -euo pipefail
 
 KUBECTL=${KUBECTL:-kubectl}
@@ -14,8 +14,8 @@ HOST=api.localtest.me
 CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.23.0}
 CHECK_NS=netcheck
 PF_PORT=${PF_PORT:-18081}
-# shellcheck source=lib/edge.sh
-source "$(dirname "$0")/lib/edge.sh"
+# shellcheck source=edge-lib.sh
+source "$(dirname "$0")/edge-lib.sh"
 BASE=$(edge_url $HOST "")
 
 pass=0

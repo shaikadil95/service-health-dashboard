@@ -14,8 +14,8 @@
 set -euo pipefail
 
 KUBECTL=${KUBECTL:-kubectl}
-# shellcheck source=lib/edge.sh
-source "$(dirname "$0")/lib/edge.sh"
+# shellcheck source=edge-lib.sh
+source "$(dirname "$0")/edge-lib.sh"
 JAR=$(mktemp)
 trap 'rm -f "$JAR"' EXIT
 # Telemetry needs a few export/scrape cycles after a fresh deploy (k6 runs continuously).

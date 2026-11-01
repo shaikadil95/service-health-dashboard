@@ -16,8 +16,8 @@
 set -euo pipefail
 
 KUBECTL=${KUBECTL:-kubectl}
-# shellcheck source=lib/edge.sh
-source "$(dirname "$0")/lib/edge.sh"
+# shellcheck source=edge-lib.sh
+source "$(dirname "$0")/edge-lib.sh"
 JAR=$(mktemp)
 CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.23.0}
 WAIT_SECONDS=${WAIT_SECONDS:-240}

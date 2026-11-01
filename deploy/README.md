@@ -562,7 +562,7 @@ Each check prints `PASS`/`FAIL` and the script exits non-zero on any failure. Th
 scrape cycles complete, so they can run right after `make up`. Since Phase 6 they call the gateway over HTTPS with the mkcert CA,
 pin every `*.localtest.me` host to 127.0.0.1 (`curl --resolve`, independent of the host's DNS resolver), get API tokens with client
 credentials and log in like a browser with [`scripts/oidc-login.py`](scripts/oidc-login.py) (Python standard library: follows the
-redirect to Keycloak, submits the login form, keeps the gateway's cookies). Shared helpers: [`scripts/lib/edge.sh`](scripts/lib/edge.sh).
+redirect to Keycloak, submits the login form, keeps the gateway's cookies). Shared helpers: [`scripts/edge-lib.sh`](scripts/edge-lib.sh).
 
 Readiness by hand:
 

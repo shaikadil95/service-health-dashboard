@@ -22,8 +22,8 @@ KUBECTL=${KUBECTL:-kubectl}
 CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.23.0}
 WAIT_SECONDS=${WAIT_SECONDS:-240}
 CHECK_NS=netcheck-identity
-# shellcheck source=lib/edge.sh
-source "$(dirname "$0")/lib/edge.sh"
+# shellcheck source=edge-lib.sh
+source "$(dirname "$0")/edge-lib.sh"
 SCRIPTS=$(cd "$(dirname "$0")" && pwd)
 TMP=$(mktemp -d)
 PROM_PORT=19290
