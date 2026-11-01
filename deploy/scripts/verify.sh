@@ -84,7 +84,7 @@ $KUBECTL -n "$CHECK_NS" run curl --image="$CURL_IMAGE" --restart=Never \
   --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"runAsGroup":101,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"curl","image":"'"$CURL_IMAGE"'","command":["sleep","600"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"volumeMounts":[{"name":"ca","mountPath":"/ca","readOnly":true}]}],"volumes":[{"name":"ca","configMap":{"name":"localtest-ca"}}]}}' \
   >/dev/null
 $KUBECTL -n "$CHECK_NS" wait --for=condition=Ready pod/curl --timeout=120s >/dev/null
-pc() { $KUBECTL -n "$CHECK_NS" exec curl -- curl -s -m 5 --cacert /ca/ca.crt "$@" 2>/dev/null || true; }
+pc() { $KUBECTL -n "$CHECK_NS" exec curl -- curl -s -m 15 --cacert /ca/ca.crt "$@" 2>/dev/null || true; }
 gw_ip=$($KUBECTL -n envoy-gateway-system get service envoy-edge -o jsonpath='{.spec.clusterIP}')
 resolved=$($KUBECTL -n "$CHECK_NS" exec curl -- nslookup "$HOST" 2>/dev/null | awk '/^Address/ {a=$2} END {print a}')
 expect "$HOST resolves in-cluster to the envoy-edge Service" "$gw_ip" "$resolved"

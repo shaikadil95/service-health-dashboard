@@ -212,15 +212,16 @@ $(CACHE_DIR)/docker-config/config.json:
 	@mkdir -p $(@D) && echo '{}' > $@
 
 .PHONY: deploy
-deploy: $(CACHE_DIR)/docker-config/config.json ## Namespaces, secrets, local CA, Keycloak Operator, all releases (helmfile apply), CoreDNS
+deploy: $(CACHE_DIR)/docker-config/config.json ## Namespaces, secrets, local CA, Keycloak Operator, CoreDNS, all releases (helmfile apply), wait for SSO
 	$(SCRIPT_ENV) deploy/scripts/namespaces.sh
 	$(SCRIPT_ENV) deploy/scripts/grafana-admin-secret.sh
 	$(SCRIPT_ENV) deploy/scripts/mkcert-ca.sh
 	$(SCRIPT_ENV) deploy/scripts/identity-secrets.sh
 	$(SCRIPT_ENV) deploy/scripts/keycloak-operator.sh
+	$(SCRIPT_ENV) deploy/scripts/coredns-localtest.sh
 	$(HELM_ENV) $(HELMFILE) --file deploy/helmfile.yaml apply --suppress-diff
 	$(KUBECTL_KIND) -n envoy-gateway-system wait --for=condition=Programmed gateway/edge --timeout=300s
-	$(SCRIPT_ENV) deploy/scripts/coredns-localtest.sh
+	$(SCRIPT_ENV) GATEWAY_HTTPS_PORT=$(GATEWAY_HTTPS_PORT) deploy/scripts/wait-identity.sh
 
 # Third-party images referenced by the rendered releases. Images of Helm test pods and of features
 # that are switched off (Envoy rate limit, Thanos sidecar) are not needed.

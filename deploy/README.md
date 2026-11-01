@@ -12,7 +12,7 @@ Keycloak single sign-on for every UI, JWT-protected APIs, client credentials bet
 (Phase 6, [details](#identity-and-single-sign-on-phase-6)).
 
 ```bash
-make up       # prereqs -> kind cluster -> images (services + stack) -> helmfile apply -> CoreDNS rewrite -> status
+make up       # prereqs -> kind cluster -> images (services + stack) -> CA, secrets, Keycloak Operator, CoreDNS rewrite -> helmfile apply -> wait for SSO -> status
 make verify   # automated checks: gateway, NetworkPolicy, readiness (2); metrics, logs, traces, UIs (3); dashboards, links, status page (4); rules, Alertmanager, Mailpit (5); TLS, SSO, API auth, shop (6)
 make demo     # failure scenarios: alert -> email in Mailpit -> status page -> recovery (5, 6)
 make sso-users          # demo logins of the Keycloak realms (generated per cluster)
@@ -94,7 +94,7 @@ namespace baseline and the services; the Prometheus Operator CRDs before everyth
 | `make cluster-up` / `cluster-down` | Create (idempotent) or delete the kind cluster |
 | `make images` | `make build` (the four Python images and the `status-web` image from [`../web/Dockerfile`](../web/Dockerfile)), then load them into kind. Docker: `kind load docker-image`. Podman: `podman save -m` to one archive → `kind load image-archive` |
 | `make platform-images` | Renders the releases (`helmfile template`), pulls the third-party images that are not on the node yet with the engine (4 in parallel) and loads them into kind ([`scripts/preload-images.sh`](scripts/preload-images.sh)) |
-| `make deploy` | Namespaces with PSA labels → Grafana admin Secret (once) → mkcert CA into the cluster → identity secrets (once) → Keycloak Operator and CRDs → `helmfile apply` → wait for `Gateway` `Programmed` → CoreDNS rewrite. Idempotent |
+| `make deploy` | Namespaces with PSA labels → Grafana admin Secret (once) → mkcert CA into the cluster → identity secrets (once) → Keycloak Operator and CRDs → CoreDNS rewrite → `helmfile apply` → wait for `Gateway` `Programmed` → wait until Keycloak serves both realms through the gateway ([`scripts/wait-identity.sh`](scripts/wait-identity.sh)). Idempotent |
 | `make up` / `make down` | `cluster-up images platform-images deploy status` / `cluster-down` |
 | `make grafana-password` | Prints the generated Grafana break-glass admin password (user `admin`) |
 | `make sso-users` | Prints the demo logins of the `ops` and `customers` realms and the Keycloak admin |
