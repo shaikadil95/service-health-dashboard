@@ -52,12 +52,30 @@ diagram is [`../docs/diagrams/overview.svg`](../docs/diagrams/overview.svg), cop
   token's subject), and the customer's orders from `GET /api/orders`. The gateway adds the customer's access token to both routes.
 - Results: confirmed, payment declined (402) or an error message; dark mode like the status page.
 
+## Keycloak login theme (customers realm)
+
+![Branded login page](../docs/screenshots/customer-login.png)
+
+- `apps/keycloak-theme` is the login theme `shd-shop`, built with [Keycloakify](https://docs.keycloakify.dev) 11.16: React pages with the
+  shop's shadcn/ui components and Tailwind tokens from `@workspace/ui`, the "Service Health Shop" brand, light/dark from
+  `prefers-color-scheme`, and Keycloak's form field names and ids unchanged. Custom pages: login, register, reset password, update
+  password, error, info, logout confirmation; the other login pages use Keycloakify's default pages with the same class map
+  (`src/login/classes.ts`). The `ops` realm keeps Keycloak's default theme.
+- `pnpm --filter keycloak-theme build` is the plain Vite build (part of `make web-check`); `build-keycloak-theme` also packages it
+  with Maven into `dist_keycloak/keycloak-theme-for-kc-all-other-versions.jar`, the JAR for Keycloak 26 (needs a JDK and Maven, so
+  `make images` runs it in a container).
+- [`../deploy/keycloak/Dockerfile`](../deploy/keycloak/Dockerfile) (build context `web/`) builds the JAR in a Node + JDK + Maven stage,
+  copies it to `/opt/keycloak/providers/` and runs `kc.sh build` with the build-time options the Keycloak Operator sets (database,
+  features, health, metrics, user event metrics, tracing), because the operator starts a custom image with `start --optimized`.
+- `pnpm --filter keycloak-theme dev` previews the pages with mock contexts (`src/login/mocks.ts`).
+
 ## Development
 
 Node ≥ 20.19 and pnpm 12 (`brew install pnpm`, or `npm i -g pnpm@12`).
 
 ```bash
-make web-check        # pnpm install --frozen-lockfile, Prettier check, ESLint, tsc, Vitest, vite build
+make web-check        # pnpm install --frozen-lockfile, Prettier check, ESLint, tsc, Vitest, vite build (all apps, incl. the theme)
+make verify-browser   # Playwright flows (e2e/) against the running cluster: landing page, logins, logouts, branded login
 make web-dev          # status page dev server; /api is proxied to STATUS_API_URL (default http://localhost:8080, `uv run status-api`)
 cd web && pnpm --filter shop dev   # shop dev server; /api/orders is proxied to ORDER_API_URL (default http://localhost:8082)
 ```
