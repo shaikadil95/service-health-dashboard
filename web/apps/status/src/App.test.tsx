@@ -6,17 +6,32 @@ import { TooltipProvider } from "@workspace/ui/components/tooltip"
 
 import { App } from "@/App"
 import { ThemeProvider } from "@/components/theme-provider"
-import type { AlertsResponse, ServicesResponse } from "@/lib/api"
+import type { AlertsResponse, Me, ServicesResponse } from "@/lib/api"
 import { noAlerts, service, servicesResponse } from "@/test/fixtures"
 
+const sre: Me = {
+  username: "sre",
+  name: "Sam Reliability",
+  email: "sre@shd.localtest.me",
+  groups: ["sre"],
+}
+
+// Without a gateway session every /api call is 401 (mockApi(401)).
 function mockApi(
   services: ServicesResponse | number,
-  alerts: AlertsResponse = noAlerts
+  alerts: AlertsResponse = noAlerts,
+  me: Me = sre
 ) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (path: string) => {
-      const body = path.endsWith("/alerts") ? alerts : services
+      const body = path.endsWith("/alerts")
+        ? alerts
+        : path.endsWith("/me")
+          ? services === 401
+            ? 401
+            : me
+          : services
       if (typeof body === "number") {
         return new Response("unavailable", { status: body })
       }
@@ -138,12 +153,28 @@ describe("App", () => {
     ).toBeInTheDocument()
   })
 
-  it("asks to sign in again when the single sign-on session expired", async () => {
+  it("shows a Login button instead of data without a session", async () => {
     mockApi(401)
     renderApp()
     expect(
-      await screen.findByText("Your session has expired")
+      await screen.findByText("Sign in to see the service status")
     ).toBeInTheDocument()
+    for (const link of screen.getAllByRole("link", { name: /login/i })) {
+      expect(link).toHaveAttribute("href", "/login")
+    }
     expect(screen.queryByText("Status API unreachable")).not.toBeInTheDocument()
+    expect(screen.queryByRole("link", { name: "Logout" })).toBeNull()
+  })
+
+  it("shows who is signed in and a Logout via the gateway", async () => {
+    mockApi(servicesResponse(), noAlerts, { ...sre, groups: ["dev"] })
+    renderApp()
+    expect(await screen.findByText("Sam Reliability")).toBeInTheDocument()
+    expect(screen.getByText("(dev)")).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: "Logout" })).toHaveAttribute(
+      "href",
+      "/oauth2/logout"
+    )
+    expect(screen.queryByRole("link", { name: /login/i })).toBeNull()
   })
 })

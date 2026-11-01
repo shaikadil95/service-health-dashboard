@@ -55,13 +55,28 @@ export type AlertsResponse = {
   generated_at: string
 }
 
-/** The single sign-on session of the gateway expired: a full page load starts a new login. */
+export type Me = {
+  username: string
+  name: string | null
+  email: string | null
+  groups: string[]
+}
+
+/** No gateway session (never signed in, signed out or expired): the page shows its Login button. */
 export class SessionExpiredError extends Error {
   constructor() {
-    super("Your session has expired")
+    super("Not signed in")
     this.name = "SessionExpiredError"
   }
 }
+
+// The page itself is public. These paths are on the status-api route, which needs the engineers'
+// gateway session (Keycloak realm ops):
+//   /login          full-page navigation: Keycloak login (skipped when Keycloak already has a
+//                   session), then the gateway redirects back to the page
+//   /oauth2/logout  ends the gateway and Keycloak sessions, then the landing page
+export const LOGIN_PATH = "/login"
+export const LOGOUT_PATH = "/oauth2/logout"
 
 // Same origin: the gateway routes /api on status.localtest.me to the Status API (no CORS).
 // X-Requested-With makes the gateway's OIDC filter answer 401 instead of redirecting an expired
@@ -86,3 +101,6 @@ export const fetchServices = (signal?: AbortSignal) =>
 
 export const fetchAlerts = (signal?: AbortSignal) =>
   getJson<AlertsResponse>("/api/v1/alerts", signal)
+
+export const fetchMe = (signal?: AbortSignal) =>
+  getJson<Me>("/api/v1/me", signal)

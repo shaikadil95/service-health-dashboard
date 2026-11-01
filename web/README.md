@@ -7,13 +7,25 @@ Scaffolded with the official CLI, `shadcn@4.23.0 init -t vite --monorepo -b radi
 |---|---|
 | `apps/status` | Status page on https://status.localtest.me (engineers, `ops` realm) |
 | `apps/shop` | Customer shop on https://shop.localtest.me (`customers` realm) |
+| `apps/home` | Public landing page on https://home.localtest.me: Customer login, engineering tools, sign-out buttons |
+| `apps/keycloak-theme` | Keycloakify login theme `shd-shop` of the `customers` realm (packaged as a JAR into the Keycloak image) |
 | `packages/ui` (`@workspace/ui`) | Shared shadcn/ui components (Card, Badge, Table, Alert, Tooltip, Chart, Skeleton, Button, Input, Label), styles and `cn` |
 
-Both apps leave sign-in to the gateway: Envoy Gateway's OIDC filter logs the user in with Keycloak and keeps the session in
+The apps leave sign-in to the gateway: Envoy Gateway's OIDC filter logs the user in with Keycloak and keeps the session in
 encrypted, HTTP-only cookies, so **no token is ever visible to JavaScript** (the backend-for-frontend pattern of
 [OAuth 2.0 for Browser-Based Apps](https://datatracker.ietf.org/doc/draft-ietf-oauth-browser-based-apps/)). Their `fetch()` calls
-send `X-Requested-With: fetch`, for which the gateway answers an expired session with 401 instead of a login redirect; the apps then
-offer to sign in again. Sign-out is the gateway's `/oauth2/logout`.
+send `X-Requested-With: fetch`, for which the gateway answers a missing or expired session with 401 instead of a login redirect; the
+apps then offer to sign in. Sign-out is the gateway's `/oauth2/logout`, which also ends the Keycloak session and lands on the landing
+page ([deploy/README.md](../deploy/README.md#landing-page-login-and-logout-phase-6b)).
+
+## Landing page
+
+![Landing page](../docs/screenshots/home.png)
+
+Public, no API. **Customer login** is a full-page link to `https://shop.localtest.me/`, which the gateway sends to Keycloak's branded
+`customers` login; the engineering cards link to the status page, Grafana, Prometheus, Alertmanager, Mailpit and the Keycloak admin
+console; two buttons sign out of the engineers' tools (`https://status.localtest.me/oauth2/logout`) and of the shop. The architecture
+diagram is [`../docs/diagrams/overview.svg`](../docs/diagrams/overview.svg), copied to `apps/home/public/architecture.svg`.
 
 ## Status page
 
@@ -27,6 +39,9 @@ offer to sign in again. Sign-out is the gateway's `/oauth2/logout`.
   dashboard. An overall banner (`aria-live`), an active-alerts table, and warnings when the API or one of its sources is unreachable
   (the last answer stays visible).
 - Dark mode: follows the system, toggle in the header (or press `d`).
+- Sign-in: the page itself is public. Without a gateway session `/api` answers 401 and the page shows **Login** (a full-page link
+  to `/login`, which runs the Keycloak login and comes back); with a session, also one from Prometheus, Alertmanager or Mailpit (same
+  cookies), the data shows at once. The header then shows "Signed in as *name* (*groups*)" from `GET /api/v1/me` and **Logout**.
 
 ## Shop
 
