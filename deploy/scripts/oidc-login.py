@@ -52,7 +52,9 @@ def fetch(
     opener, url: str, data: bytes | None = None, headers: dict | None = None
 ) -> tuple[int, str, str]:
     """(status, final URL, body) following redirects; HTTP errors are results, not exceptions."""
-    request = urllib.request.Request(
+    if not url.startswith("https://"):
+        raise ValueError(f"only https:// URLs: {url}")
+    request = urllib.request.Request(  # noqa: S310 (scheme checked above)
         url, data=data, headers={"User-Agent": "oidc-login/1", **(headers or {})}
     )
     try:
@@ -84,7 +86,7 @@ def main() -> int:
 
     status, url, body = fetch(opener, args.urls[0])
     match = FORM.search(body)
-    if not match or "/protocol/openid-connect/" not in url and "/login-actions/" not in url:
+    if not match or ("/protocol/openid-connect/" not in url and "/login-actions/" not in url):
         print(f"no login page: {status} {url}", file=sys.stderr)
         return 2
     action = html.unescape(match.group(1))
