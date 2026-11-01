@@ -29,15 +29,30 @@ releases:
     values:
       - values/envoy-gateway.yaml
 
+  # cert-manager with its CRDs (Phase 6): the ClusterIssuer and the *.localtest.me Certificate of the
+  # HTTPS listener live in the edge release. Needs the Prometheus Operator CRDs for its ServiceMonitor.
+  - name: cert-manager
+    namespace: cert-manager
+    chart: oci://quay.io/jetstack/charts/cert-manager
+    version: v1.21.3
+    labels: { tier: edge }
+    needs: [observability/prometheus-operator-crds]
+    disableValidationOnInstall: true # ServiceMonitor
+    values:
+      - values/cert-manager.yaml
+
   - name: edge
     namespace: envoy-gateway-system
     chart: ./charts/edge
     labels: { tier: edge }
-    # Its CRs (EnvoyProxy, GatewayClass, Gateway) use CRDs that the envoy-gateway release installs,
-    # so on a fresh cluster helm-diff must not validate them against the API server yet.
-    disableValidationOnInstall: true
+    # Its CRs (EnvoyProxy, GatewayClass, Gateway, ClusterIssuer, Certificate) use CRDs that the
+    # envoy-gateway and cert-manager releases install, so on a fresh cluster helm-diff must not
+    # validate them against the API server yet. disableValidation also covers an upgrade of a
+    # cluster that predates cert-manager (Phase 5 -> 6), where the release exists already.
+    disableValidation: true
     needs:
       - envoy-gateway-system/envoy-gateway
+      - cert-manager/cert-manager
 
   # --- Applications (namespace "apps") ---------------------------------------------------------
   - name: apps-baseline
@@ -86,6 +101,25 @@ releases:
     needs: [envoy-gateway-system/edge, apps/apps-baseline]
     disableValidationOnInstall: true
     values: [values/status-web.yaml]
+
+  # Customer shop page (Phase 6) on shop.localtest.me; its /api routes go to order and user.
+  - name: shop-web
+    namespace: apps
+    chart: ./charts/microservice
+    labels: { tier: apps }
+    needs: [envoy-gateway-system/edge, apps/apps-baseline, apps/order, apps/user]
+    disableValidationOnInstall: true
+    values: [values/shop-web.yaml]
+
+  # Edge authentication of the routes in "apps" (Phase 6): JWT on api.localtest.me, OIDC login for
+  # the status page and the shop. Needs the routes it targets and Keycloak for the JWKS.
+  - name: sso-apps
+    namespace: apps
+    chart: ./charts/sso
+    labels: { tier: apps }
+    needs: [apps/user, apps/order, apps/status-api, apps/status-web, apps/shop-web, identity/identity]
+    disableValidationOnInstall: true # SecurityPolicy, Backend, BackendTLSPolicy
+    values: [values/sso-apps.yaml]
 
   # --- Observability (namespace "observability") -------------------------------------------------
   # Default-deny NetworkPolicies plus the allow-list of every flow of the stack (Phase 5), before any
@@ -171,6 +205,36 @@ releases:
       - observability/kube-prometheus-stack
       - observability/blackbox-exporter
     disableValidationOnInstall: true
+
+  # Single sign-on for Prometheus, Alertmanager and Mailpit (Phase 6, ops realm, group sre).
+  - name: sso-observability
+    namespace: observability
+    chart: ./charts/sso
+    labels: { tier: observability }
+    needs: [observability/observability-config, identity/identity]
+    disableValidationOnInstall: true # SecurityPolicy, Backend, BackendTLSPolicy
+    values: [values/sso-observability.yaml]
+
+  # --- Identity (namespace "identity", Phase 6) ---------------------------------------------------
+  # The Keycloak Operator and its CRDs are applied before helmfile from the official manifests
+  # (deploy/scripts/keycloak-operator.sh, deploy/keycloak-operator); the Keycloak Operator has no
+  # official Helm chart.
+  - name: identity-baseline
+    namespace: identity
+    chart: ./charts/namespace-baseline
+    labels: { tier: identity }
+    values: [values/identity-baseline.yaml]
+
+  - name: identity
+    namespace: identity
+    chart: ./charts/identity
+    labels: { tier: identity }
+    # The operator creates a ServiceMonitor for Keycloak (Prometheus Operator CRDs).
+    needs:
+      - identity/identity-baseline
+      - envoy-gateway-system/edge
+      - observability/prometheus-operator-crds
+    disableValidationOnInstall: true # Keycloak, KeycloakRealmImport, HTTPRoute
 
   # --- Load generator (namespace "loadgen") -----------------------------------------------------
   # Steady background traffic through the edge; `make load-stop` / `make load-start` scale it.

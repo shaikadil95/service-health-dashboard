@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 # Automated Phase 4 checks against the running kind cluster (`make verify`, after verify-telemetry.sh).
 #   1. Status API and status page workloads are available.
-#   2. http://status.localtest.me: the page (SPA fallback, hashed assets), the documented JSON of
+#   2. https://status.localtest.me (signed in as the demo user "viewer"): the page (SPA fallback, hashed assets), the documented JSON of
 #      /api/v1/services, /services/{name} and /alerts, all three services UP; operational
 #      endpoints of the Status API are not routed.
-#   3. NetworkPolicy: the Status API and the page are only reachable through the gateway.
+#   3. NetworkPolicy: the Status API and the page are only reachable through the gateway, and the
+#      gateway asks for a login first.
 #   4. Grafana: both dashboards provisioned, every Prometheus query has data for all three services,
 #      the logs panel returns lines.
 #   5. Correlations: datasource settings, and links that resolve: exemplar -> trace,
 #      log line -> trace, trace -> logs, service map metrics.
-# Host requests go through the edge Gateway, pinned to 127.0.0.1 with --resolve (as verify.sh).
+# Host requests go through the edge Gateway, pinned to 127.0.0.1 with --resolve (as verify.sh). Since
+# Phase 6 the status host requires single sign-on (ops realm): the script logs in once as "viewer"
+# and reuses the gateway's session cookies; Grafana is queried with its break-glass admin.
 set -euo pipefail
 
 KUBECTL=${KUBECTL:-kubectl}
-HTTP_PORT=${GATEWAY_HTTP_PORT:-80}
+# shellcheck source=lib/edge.sh
+source "$(dirname "$0")/lib/edge.sh"
+JAR=$(mktemp)
 CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.23.0}
 WAIT_SECONDS=${WAIT_SECONDS:-240}
 CHECK_NS=netcheck-status
@@ -33,16 +38,16 @@ expect() { # <description> <expected> <actual>
   [[ $2 == "$3" ]] && ok "$1 -> $3" || ko "$1 -> $3 (expected $2)"
 }
 cleanup() {
+  rm -f "$JAR"
   $KUBECTL delete namespace "$CHECK_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-ui() { # ui <host> <curl args...>
-  local host=$1
+ui() { # ui <host> <curl args...>: through the gateway, with the SSO session
   shift
-  curl -s -m 15 --resolve "$host:$HTTP_PORT:127.0.0.1" "$@"
+  edge_curl -b "$JAR" -c "$JAR" "$@"
 }
-url() { echo "http://$1:$HTTP_PORT$2"; }
+url() { edge_url "$1" "$2"; }
 STATUS=status.localtest.me
 GRAFANA=grafana.localtest.me
 
@@ -72,7 +77,12 @@ for d in status-api status-web; do
   fi
 done
 
-echo "== 2. Status page and Status API (http://$STATUS)"
+echo "== 2. Status page and Status API (https://$STATUS, signed in as viewer)"
+if sso_login viewer "$(url $STATUS /)" "$JAR"; then
+  ok "single sign-on as viewer (ops realm)"
+else
+  ko "single sign-on as viewer failed"
+fi
 page=$(ui $STATUS -w '\n%{http_code} %{content_type}' "$(url $STATUS /)")
 expect "GET / (status page)" "200 text/html" "${page##*$'\n'}"
 [[ $page == *"<title>Service status</title>"* ]] && ok "index.html is the status page" || ko "index.html title missing"
@@ -130,33 +140,41 @@ expect "PUT /admin/faults (not routed to the API)" 405 \
 echo "== 3. NetworkPolicy (namespace $CHECK_NS, outside apps)"
 $KUBECTL wait --for=delete "namespace/$CHECK_NS" --timeout=120s >/dev/null 2>&1 || true
 $KUBECTL create namespace "$CHECK_NS" --dry-run=client -o yaml | $KUBECTL apply -f - >/dev/null
+$KUBECTL -n "$CHECK_NS" create configmap localtest-ca --from-file=ca.crt="$CA_FILE" --dry-run=client -o yaml |
+  $KUBECTL apply -f - >/dev/null
 $KUBECTL -n "$CHECK_NS" run curl --image="$CURL_IMAGE" --restart=Never \
-  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"runAsGroup":101,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"curl","image":"'"$CURL_IMAGE"'","command":["sleep","600"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' \
+  --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"runAsGroup":101,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"curl","image":"'"$CURL_IMAGE"'","command":["sleep","600"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},"volumeMounts":[{"name":"ca","mountPath":"/ca","readOnly":true}]}],"volumes":[{"name":"ca","configMap":{"name":"localtest-ca"}}]}}' \
   >/dev/null
 $KUBECTL -n "$CHECK_NS" wait --for=condition=Ready pod/curl --timeout=120s >/dev/null
-pc() { $KUBECTL -n "$CHECK_NS" exec curl -- curl -s -m 5 "$@" 2>/dev/null || true; }
+pc() { $KUBECTL -n "$CHECK_NS" exec curl -- curl -s -m 5 --cacert /ca/ca.crt "$@" 2>/dev/null || true; }
 expect "pod outside apps -> status-api.apps directly (blocked)" 000 "$(pc -o /dev/null -w '%{http_code}' http://status-api.apps/api/v1/services)"
 expect "pod outside apps -> status-web.apps directly (blocked)" 000 "$(pc -o /dev/null -w '%{http_code}' http://status-web.apps/)"
-expect "pod: GET http://$STATUS/api/v1/services via the gateway" 200 "$(pc -o /dev/null -w '%{http_code}' "http://$STATUS/api/v1/services")"
+expect "pod: GET https://$STATUS/api/v1/services via the gateway, no session (login first)" \
+  "302 https://sso.localtest.me/realms/ops/" \
+  "$(pc -o /dev/null -w '%{http_code} %{redirect_url}' "https://$STATUS/api/v1/services" | cut -c1-40)"
 ok "status-api -> Prometheus 9090 and Alertmanager 9093 allowed (both sources ok above)"
 
-echo "== 4. Grafana dashboards (via http://$GRAFANA)"
+echo "== 4. Grafana dashboards (via https://$GRAFANA)"
 password=$($KUBECTL -n observability get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d)
-gf() { ui $GRAFANA -u "admin:$password" "$@"; }
-export GF_URL GF_AUTH
+gf() { edge_curl -u "admin:$password" "$@"; }
+export GF_URL GF_AUTH CA_FILE
 GF_URL=$(url $GRAFANA "")
 GF_AUTH="admin:$password"
 # grafana_py <script>: Python with a small client for Grafana's API (datasource queries via /api/ds/query).
 grafana_py() {
   python3 - "$@" <<PY
-import base64, json, os, sys, time, urllib.request
+import base64, json, os, socket, ssl, sys, time, urllib.request
 BASE, AUTH = os.environ["GF_URL"], base64.b64encode(os.environ["GF_AUTH"].encode()).decode()
-HOST = "$GRAFANA"
+# Pin *.localtest.me to the gateway on 127.0.0.1 (like curl --resolve) and trust the mkcert CA.
+_getaddrinfo = socket.getaddrinfo
+socket.getaddrinfo = lambda host, *a, **k: _getaddrinfo(
+    "127.0.0.1" if str(host).endswith(".localtest.me") else host, *a, **k)
+CTX = ssl.create_default_context(cafile=os.environ["CA_FILE"])
 def call(path, body=None):
-    req = urllib.request.Request(BASE.replace(HOST, "127.0.0.1") + path,
+    req = urllib.request.Request(BASE + path,
         data=None if body is None else json.dumps(body).encode(),
-        headers={"Host": HOST, "Authorization": "Basic " + AUTH, "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as r:
+        headers={"Authorization": "Basic " + AUTH, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20, context=CTX) as r:
         return json.load(r)
 def ds_query(queries, frm="now-15m", to="now"):
     return call("/api/ds/query", {"queries": queries, "from": frm, "to": to})["results"]
@@ -186,8 +204,8 @@ d = call("/api/dashboards/uid/shd-overview")["dashboard"]
 out = []
 for p in d["panels"]:
     for t in p["targets"]:
-        if p["type"] == "table":
-            continue  # firing alerts: empty while healthy
+        if p["type"] == "table" or p["id"] >= 6:
+            continue  # firing alerts: empty while healthy; identity panels: checked in verify-identity.sh
         q = {"refId": "A", "datasource": t["datasource"], "expr": t["expr"], "instant": t.get("instant", False),
              "range": t.get("range", True), "intervalMs": 15000, "maxDataPoints": 100}
         res = ds_query([q])["A"]

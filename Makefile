@@ -14,7 +14,7 @@ ENGINE ?= $(shell podman info >/dev/null 2>&1 && echo podman || echo docker)
 COMPOSE ?= $(ENGINE) compose
 SERVICES := user-service order-service payment-service status-api
 # Static web apps in the pnpm monorepo web/ (image <app>-web, served by nginx-unprivileged).
-WEB_APPS := status
+WEB_APPS := status shop
 IMAGE_PREFIX ?= localhost/shd
 IMAGE_TAG ?= dev
 COLLECTOR_IMAGE := $(shell awk '/opentelemetry-collector-contrib:/ {print $$2}' compose.yaml)
@@ -212,9 +212,12 @@ $(CACHE_DIR)/docker-config/config.json:
 	@mkdir -p $(@D) && echo '{}' > $@
 
 .PHONY: deploy
-deploy: $(CACHE_DIR)/docker-config/config.json ## Install or upgrade all releases (helmfile apply) and configure CoreDNS
+deploy: $(CACHE_DIR)/docker-config/config.json ## Namespaces, secrets, local CA, Keycloak Operator, all releases (helmfile apply), CoreDNS
 	$(SCRIPT_ENV) deploy/scripts/namespaces.sh
 	$(SCRIPT_ENV) deploy/scripts/grafana-admin-secret.sh
+	$(SCRIPT_ENV) deploy/scripts/mkcert-ca.sh
+	$(SCRIPT_ENV) deploy/scripts/identity-secrets.sh
+	$(SCRIPT_ENV) deploy/scripts/keycloak-operator.sh
 	$(HELM_ENV) $(HELMFILE) --file deploy/helmfile.yaml apply --suppress-diff
 	$(KUBECTL_KIND) -n envoy-gateway-system wait --for=condition=Programmed gateway/edge --timeout=300s
 	$(SCRIPT_ENV) deploy/scripts/coredns-localtest.sh
@@ -226,7 +229,8 @@ PLATFORM_IMAGE_SKIP := /bats/|/ratelimit:|/thanos:
 
 .PHONY: platform-images
 platform-images: $(CACHE_DIR)/docker-config/config.json ## Pull the stack's images with the engine (parallel) and load them into kind
-	$(HELM_ENV) $(HELMFILE) --file deploy/helmfile.yaml template 2>/dev/null \
+	{ $(HELM_ENV) $(HELMFILE) --file deploy/helmfile.yaml template 2>/dev/null; \
+	  $(KUBECTL) kustomize deploy/keycloak-operator/operator; } \
 	  | grep -oE '$(PLATFORM_IMAGE_REGEX)' | grep -vE '$(PLATFORM_IMAGE_SKIP)' \
 	  | ENGINE=$(ENGINE) KIND=$(KIND) CLUSTER_NAME=$(CLUSTER_NAME) CACHE_DIR=$(CACHE_DIR) deploy/scripts/preload-images.sh
 
@@ -249,14 +253,38 @@ status: ## Show nodes, gateway, routes and workloads
 	@echo; $(KUBECTL_KIND) -n apps get deploy,pods,svc,networkpolicy
 	@echo; $(KUBECTL_KIND) -n observability get pods,pvc
 	@echo; $(KUBECTL_KIND) -n loadgen get deploy
-	@echo; echo "API: http://api.localtest.me/orders  (POST/GET), http://api.localtest.me/users/u-1001"
-	@echo "Status page: http://status.localtest.me (API: http://status.localtest.me/api/v1/services)"
-	@echo "UIs: http://grafana.localtest.me (admin, password: make grafana-password), http://prometheus.localtest.me, http://alertmanager.localtest.me"
-	@echo "On-call inbox: http://mail.localtest.me (Mailpit); failure scenarios: make demo"
+	@echo; $(KUBECTL_KIND) -n identity get keycloak,pods
+	@echo; echo "HTTPS with the mkcert CA (trust it once: mkcert -install). Logins: make sso-users"
+	@echo "Shop: https://shop.localtest.me   API (bearer token): https://api.localtest.me/orders"
+	@echo "Status page: https://status.localtest.me   Grafana: https://grafana.localtest.me (Keycloak, or admin: make grafana-password)"
+	@echo "SRE only: https://prometheus.localtest.me https://alertmanager.localtest.me https://mail.localtest.me (on-call inbox)"
+	@echo "Keycloak: https://sso.localtest.me   Failure scenarios: make demo"
 
 .PHONY: grafana-password
-grafana-password: ## Print the generated Grafana admin password (user: admin)
+grafana-password: ## Print the generated Grafana break-glass admin password (user: admin)
 	@$(KUBECTL_KIND) -n observability get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d; echo
+
+# A separate Chrome profile that resolves *.localtest.me to the gateway itself (for networks whose DNS
+# drops 127.0.0.1 answers) and accepts certificates chained to the mkcert CA without installing it
+# into a trust store (no admin rights). The flags only apply to this profile.
+CHROME_APP ?= Google Chrome
+.PHONY: browser
+browser: ## Open Chrome with *.localtest.me -> 127.0.0.1 and the mkcert CA accepted (separate profile)
+	@spki=$$(openssl x509 -in "$$(mkcert -CAROOT)/rootCA.pem" -pubkey -noout | openssl pkey -pubin -outform der \
+	  | openssl dgst -sha256 -binary | base64); \
+	open -na "$(CHROME_APP)" --args --user-data-dir="$$HOME/.shd-chrome" \
+	  --host-resolver-rules="MAP *.localtest.me 127.0.0.1" --ignore-certificate-errors-spki-list="$$spki" \
+	  https://status.localtest.me https://shop.localtest.me
+
+.PHONY: sso-users
+sso-users: ## Print the demo logins (Keycloak realms ops and customers, Keycloak admin console)
+	@s() { $(KUBECTL_KIND) -n identity get secret $$1 -o jsonpath="{.data.$$2}" | base64 -d; }; \
+	printf '%-10s %-10s %-26s %s\n' REALM USER PASSWORD "USE FOR"; \
+	printf '%-10s %-10s %-26s %s\n' ops sre "$$(s realm-secrets SRE_PASSWORD)" "Grafana Admin; Prometheus, Alertmanager, Mailpit, status page"; \
+	printf '%-10s %-10s %-26s %s\n' ops dev "$$(s realm-secrets DEV_PASSWORD)" "Grafana Editor; status page"; \
+	printf '%-10s %-10s %-26s %s\n' ops viewer "$$(s realm-secrets VIEWER_PASSWORD)" "Grafana Viewer; status page"; \
+	printf '%-10s %-10s %-26s %s\n' customers customer "$$(s realm-secrets CUSTOMER_PASSWORD)" "https://shop.localtest.me (or register a new customer)"; \
+	printf '%-10s %-10s %-26s %s\n' master "$$(s keycloak-admin username)" "$$(s keycloak-admin password)" "https://sso.localtest.me/admin (Keycloak admin console)"
 
 .PHONY: load-start
 load-start: ## Start the k6 load generator (steady order traffic through the gateway)
@@ -268,11 +296,12 @@ load-stop: ## Stop the k6 load generator
 	$(KUBECTL_KIND) -n loadgen scale deployment/loadgen --replicas=0
 
 .PHONY: verify
-verify: verify-image ## Automated platform (2), telemetry (3), visualization (4) and alerting (5) checks against the running cluster
-	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify.sh
-	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) deploy/scripts/verify-telemetry.sh
-	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify-status.sh
+verify: verify-image ## Automated checks: platform (2), telemetry (3), visualization (4), alerting (5), identity and SSO (6)
+	$(SCRIPT_ENV) GATEWAY_HTTPS_PORT=$(GATEWAY_HTTPS_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify.sh
+	$(SCRIPT_ENV) GATEWAY_HTTPS_PORT=$(GATEWAY_HTTPS_PORT) deploy/scripts/verify-telemetry.sh
+	$(SCRIPT_ENV) GATEWAY_HTTPS_PORT=$(GATEWAY_HTTPS_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify-status.sh
 	$(SCRIPT_ENV) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify-alerting.sh
+	$(SCRIPT_ENV) GATEWAY_HTTP_PORT=$(GATEWAY_HTTP_PORT) GATEWAY_HTTPS_PORT=$(GATEWAY_HTTPS_PORT) CURL_IMAGE=$(VERIFY_IMAGE) deploy/scripts/verify-identity.sh
 
 .PHONY: demo
 demo: ## Failure scenarios a-d: alerts, emails in Mailpit, inhibition, recovery (scripts/demo.sh all, ~25 min)
@@ -284,8 +313,13 @@ demo-reset: ## Reset fault injection and scale the services back to 1
 
 .PHONY: lint-charts
 lint-charts: ## helm lint and render the local charts with every values file
-	helm lint --strict deploy/charts/edge deploy/charts/namespace-baseline deploy/charts/observability-config deploy/charts/alerting loadgen
-	@for svc in user order payment status-api status-web; do \
+	helm lint --strict deploy/charts/edge deploy/charts/namespace-baseline deploy/charts/observability-config deploy/charts/alerting \
+	  deploy/charts/identity loadgen
+	helm lint --strict deploy/charts/namespace-baseline -f deploy/values/observability-baseline.yaml
+	helm lint --strict deploy/charts/namespace-baseline -f deploy/values/identity-baseline.yaml
+	helm lint --strict deploy/charts/sso -f deploy/values/sso-apps.yaml
+	helm lint --strict deploy/charts/sso -f deploy/values/sso-observability.yaml
+	@for svc in user order payment status-api status-web shop-web; do \
 	  helm lint --strict deploy/charts/microservice -f deploy/values/$$svc.yaml && \
 	  helm template $$svc deploy/charts/microservice -n apps -f deploy/values/$$svc.yaml > /dev/null || exit 1; \
 	done
