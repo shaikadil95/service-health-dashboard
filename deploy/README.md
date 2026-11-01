@@ -98,7 +98,7 @@ namespace baseline and the services; the Prometheus Operator CRDs before everyth
 | `make up` / `make down` | `cluster-up images platform-images deploy status` / `cluster-down` |
 | `make grafana-password` | Prints the generated Grafana break-glass admin password (user `admin`) |
 | `make sso-users` | Prints the demo logins of the `ops` and `customers` realms and the Keycloak admin |
-| `make browser` | Opens Chrome with a separate profile that maps `*.localtest.me` to 127.0.0.1 and accepts the mkcert CA (no trust store change, no admin rights) |
+| `make browser` | Opens Chrome with a separate profile that maps `*.localtest.me` to 127.0.0.1 and accepts the gateway's certificate (no trust store change, no admin rights) |
 | `make load-start` / `load-stop` | Scale the k6 load generator to 1 / 0 replicas |
 | `make redeploy` | Rebuild and reload the images, then `rollout restart` the services (the tag stays `dev`) |
 | `make status` | Nodes, Gateway and HTTPRoutes, Envoy Service, workloads and NetworkPolicies |
@@ -301,21 +301,27 @@ No PVC: Grafana (provisioned from ConfigMaps), the services (in-memory). The Col
 
 ### Resources (measured)
 
-Every container has requests and limits (the columns show the configured values). Working sets measured with Prometheus
-(cAdvisor) about 15 minutes after `make up`, k6 running; Podman machine with 4 CPUs and 10 GiB:
+Every container has requests and limits (the columns show the configured values of the running pods). Working sets measured
+with Prometheus (cAdvisor) after `make down && make up && make verify && make demo` with all phases deployed (2026-11-01), k6
+running; Podman machine with 4 CPUs and 10 GiB:
 
 | Namespace | Working set | Requests | Limits |
 |---|---|---|---|
-| observability | 1306 MiB | 1818 MiB | 5312 MiB |
-| kube-system (kind control plane) | 959 MiB | 290 MiB | 340 MiB |
-| envoy-gateway-system | 79 MiB | 288 MiB | 1024 MiB |
-| apps | 154 MiB | 384 MiB | 768 MiB |
-| loadgen | 14 MiB | 64 MiB | 256 MiB |
-| **Total** | **2.5 GiB** | **2.8 GiB** | 7.5 GiB |
+| observability (incl. Mailpit) | 1676 MiB | 1850 MiB | 5440 MiB |
+| kube-system (kind control plane) | 1223 MiB | 290 MiB | 340 MiB |
+| identity (Keycloak, operator, PostgreSQL) | 868 MiB | 1154 MiB | 1730 MiB |
+| apps (3 services, Status API, status page, shop) | 271 MiB | 544 MiB | 1152 MiB |
+| cert-manager | 119 MiB | 120 MiB | 320 MiB |
+| envoy-gateway-system | 94 MiB | 288 MiB | 1024 MiB |
+| loadgen, local-path-storage | 50 MiB | 64 MiB | 256 MiB |
+| **Total** | **4.2 GiB** | **4.2 GiB** | 10.3 GiB |
 
-Largest consumers in `observability`: Grafana 440 MiB (incl. two sidecars), Prometheus 291 MiB (58k head series),
-Collector 70–220 MiB, Tempo 154 MiB, Loki 91 MiB. The node reported 3.3 GiB of 9.7 GiB in use; CPU stayed below
-0.25 cores in total. `metrics-server` is not installed, so `kubectl top` is not available; Prometheus covers it.
+Largest pods: kube-apiserver 941 MiB, Keycloak 584 MiB, Prometheus 549 MiB, Grafana 459 MiB (incl. two sidecars), Keycloak
+Operator 231 MiB, Tempo 203 MiB, Collector 180 MiB, Loki 105 MiB. The node reported 4.8 GiB of 9.7 GiB in use; CPU about
+0.6 cores in total (Keycloak 0.27). Phase 6 added about 1.1 GiB (Keycloak, its operator, PostgreSQL, cert-manager). Limits
+add up to slightly more than the VM: they are ceilings, not reservations; requests (what the scheduler reserves) are 4.2 GiB.
+The two realm import Jobs (Keycloak `kc.sh import`, peak ~570 MiB each) only run while a realm is created. `metrics-server` is
+not installed, so `kubectl top` is not available; Prometheus covers it.
 
 ## Visualization and status page (Phase 4)
 
@@ -418,6 +424,8 @@ dashboard, the Prometheus query, the Alertmanager view and a pre-filled silence.
 critical payment latency alert mutes its warning; `PodNotReady`/`PodCrashLooping` mute kube-prometheus-stack's slower
 `KubePodNotReady`/`KubePodCrashLooping` for the same pod; `KeycloakDown` mutes `LoginFailureSpike` and `TokenLatencyHigh`.
 
+![An alert email in Mailpit (the on-call inbox), with runbook, dashboard and Prometheus links](../docs/screenshots/mailpit-alert-email.png)
+
 **Checks.** `make lint` runs `promtool check rules` and `amtool check-config`; `make test` runs the promtool unit tests and
 the Alertmanager routing tests (`make rules-test`). Both use the Prometheus and Alertmanager images of the deployed
 versions through the container engine, so nothing has to be installed.
@@ -486,8 +494,11 @@ namespace with clients (`apps`, `observability`, `loadgen`, `identity`, `envoy-g
 `cert-manager`, CRDs as templates with `crds.keep`) issues the `*.localtest.me` ECDSA certificate (90 days, renewed after 60) for
 the Gateway's new HTTPS listener (443 → NodePort 30443). The HTTP listener accepts only the `https-redirect` route of the edge
 chart: 301 to HTTPS for the browser hosts, 404 for `api.localtest.me` (no redirect for clients that may send a token).
-**Trust the CA once** with `mkcert -install` (it may ask for your password), or use `make browser`, which accepts certificates
-chained to the CA in a separate Chrome profile (`--ignore-certificate-errors-spki-list` with the CA key's hash).
+**Trust the CA once** with `mkcert -install` (it may ask for your password), or use `make browser`, which accepts the gateway's
+certificate in a separate Chrome profile (`--ignore-certificate-errors-spki-list` with the hash of the served certificate's key;
+Chrome compares it with the presented chain, which is only the leaf, so rerun `make browser` after a renewal).
+
+![Keycloak login page of the customers realm (shop.localtest.me redirects here)](../docs/screenshots/keycloak-login.png)
 
 **Keycloak.** [`scripts/keycloak-operator.sh`](scripts/keycloak-operator.sh) applies the official Keycloak Operator 26.8.1
 manifests, pinned and patched with kubectl's built-in kustomize ([`keycloak-operator/`](keycloak-operator)): namespace `identity`
@@ -590,7 +601,7 @@ as DNS-rebinding protection; check with `dig +short shop.localtest.me` (empty) v
   make browser
   # equivalent to (Chrome or Edge):
   open -na "Google Chrome" --args --user-data-dir="$HOME/.shd-chrome" \
-    --host-resolver-rules="MAP *.localtest.me 127.0.0.1"   # plus --ignore-certificate-errors-spki-list=<CA key hash>
+    --host-resolver-rules="MAP *.localtest.me 127.0.0.1"   # plus --ignore-certificate-errors-spki-list=<served cert key hash>
   ```
 
   `make browser CHROME_APP="Microsoft Edge"` uses Edge. The flags only apply to that profile.
