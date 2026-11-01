@@ -1,0 +1,50 @@
+{{- with .Values.tls }}
+# CA issuer backed by the mkcert local CA (Secret in cert-manager's cluster resource namespace,
+# created by deploy/scripts/mkcert-ca.sh). https://cert-manager.io/docs/configuration/ca/
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .clusterIssuer.name }}
+spec:
+  ca:
+    secretName: {{ .clusterIssuer.caSecretName }}
+---
+# Wildcard certificate of the Gateway's HTTPS listener. cert-manager renews it before it expires and
+# Envoy Gateway picks up the new Secret without a restart.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .certificate.name }}
+spec:
+  secretName: {{ .certificate.secretName }}
+  issuerRef:
+    kind: ClusterIssuer
+    name: {{ .clusterIssuer.name }}
+  dnsNames:
+    {{- toYaml .certificate.dnsNames | nindent 4 }}
+  duration: {{ .certificate.duration }}
+  renewBefore: {{ .certificate.renewBefore }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+{{- end }}
+---
+# http://<host>/<path> -> 301 https://<host>/<path>. Attached to the HTTP listener only, which accepts
+# routes from this namespace only.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: https-redirect
+spec:
+  parentRefs:
+    - name: {{ .Values.name }}
+      sectionName: http
+  hostnames:
+    {{- toYaml .Values.redirect.hostnames | nindent 4 }}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301

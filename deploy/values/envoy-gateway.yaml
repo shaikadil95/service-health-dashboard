@@ -10,3 +10,12 @@ deployment:
         memory: 128Mi
       limits:
         memory: 512Mi
+
+# Phase 6: the OIDC and JWT SecurityPolicies reach Keycloak through a `Backend` resource (FQDN
+# sso.localtest.me:443) with a BackendTLSPolicy that trusts the mkcert CA, as in
+# https://gateway.envoyproxy.io/docs/tasks/security/oidc/#connect-to-an-oidc-provider-with-self-signed-certificate
+# The Backend API is an Envoy Gateway extension that must be switched on.
+config:
+  envoyGateway:
+    extensionApis:
+      enableBackend: true
