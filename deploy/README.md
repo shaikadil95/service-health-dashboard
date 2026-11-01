@@ -633,6 +633,8 @@ pages. The `ops` realm keeps Keycloak's default theme. The theme JAR goes into a
 `quay.io/keycloak/keycloak:26.8.1` + the JAR in `/opt/keycloak/providers` + `kc.sh build` with the same build-time options as the
 `Keycloak` CR, as the [container guide](https://www.keycloak.org/server/containers) describes. The `Keycloak` CR sets `image:
 localhost/shd/keycloak:dev` (loaded into kind by `make images`); the operator starts a custom image with `--optimized`.
+Measured on a clean cluster: image 484 MB (stock 479 MB); Keycloak's working set ~600 MiB (peak 626 MiB in 1 h) against ~620 MiB
+(peak 667 MiB) with the stock image, i.e. no measurable RAM cost; the landing page's nginx adds ~5 MiB.
 
 ![Branded login page of the customers realm](../docs/screenshots/customer-login.png)
 
