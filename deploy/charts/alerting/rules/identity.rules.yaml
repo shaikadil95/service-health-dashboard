@@ -1,0 +1,64 @@
+# Identity (Phase 6): Keycloak availability, failed logins and token endpoint latency. Metrics from
+# Keycloak's management port (ServiceMonitor created by the Keycloak Operator): `up`, the user event
+# metrics (keycloak_user_events_total{realm, event, error}) and the HTTP server histogram
+# (http_server_requests_seconds_*, http-metrics-histograms-enabled).
+groups:
+  - name: shd-identity.alerts
+    interval: 30s
+    rules:
+      # Nobody can sign in. Scaled to 0, the target disappears, hence absent() instead of up == 0.
+      - alert: KeycloakDown
+        expr: absent(up{namespace="identity", job="keycloak-service"} == 1)
+        for: 2m
+        labels:
+          severity: critical
+          service: keycloak
+          namespace: identity
+        annotations:
+          summary: "Keycloak is down: nobody can sign in"
+          description: >-
+            Prometheus has not scraped a healthy Keycloak instance for more than 2 minutes.
+            Customers cannot sign in to the shop, engineers cannot open the monitoring UIs, and
+            services cannot get new client-credentials tokens.
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/KeycloakDown.md
+          dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview
+
+      # More than 30 % of browser logins of a realm fail, with at least 10 attempts in 5 minutes
+      # (a single user mistyping a password is not an incident).
+      - alert: LoginFailureSpike
+        expr: |
+          (
+            sum by (realm) (rate(keycloak_user_events_total{namespace="identity", event="login", error!=""}[5m]))
+            / sum by (realm) (rate(keycloak_user_events_total{namespace="identity", event="login"}[5m]))
+          ) > 0.3
+          and sum by (realm) (increase(keycloak_user_events_total{namespace="identity", event="login"}[5m])) >= 10
+        for: 5m
+        labels:
+          severity: warning
+          service: keycloak
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of logins in realm {{ $labels.realm }} fail"
+          description: >-
+            More than 30 % of the login attempts in the Keycloak realm {{ $labels.realm }} have
+            failed over the last 5 minutes, for more than 5 minutes: password guessing, or a
+            broken client or identity configuration.
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/LoginFailureSpike.md
+          dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview
+
+      - alert: TokenLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_server_requests_seconds_bucket{namespace="identity", uri="/realms/{realm}/protocol/{protocol}/token"}[5m]))
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          service: keycloak
+        annotations:
+          summary: "Keycloak's token endpoint is slow: p95 {{ $value | humanizeDuration }}"
+          description: >-
+            The 95th percentile duration of token requests (code exchange, refresh, client
+            credentials) has been above 500 ms over the last 5 minutes, for more than 5 minutes.
+            Logins and service-to-service calls with expired tokens are slow.
+          runbook_url: https://github.com/shaikadil95/service-health-dashboard/blob/main/docs/runbooks/TokenLatencyHigh.md
+          dashboard_url: https://grafana.localtest.me/d/shd-overview/service-health-overview

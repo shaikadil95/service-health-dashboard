@@ -2,8 +2,8 @@
 # Failure scenarios for the running kind cluster (`make up` first): break a service, watch the alert
 # fire, the email arrive in Mailpit and the status page change, then repair it.
 #
-#   scripts/demo.sh all        a -> c -> b -> d, then reset and wait for every RESOLVED email (~25 min)
-#   scripts/demo.sh a|b|c|d    one scenario, with reset (and its RESOLVED email unless NO_RESOLVE=1)
+#   scripts/demo.sh all        a -> c -> b -> d -> e, then reset and wait for every RESOLVED email (~30 min)
+#   scripts/demo.sh a|b|c|d|e  one scenario, with reset (and its RESOLVED email unless NO_RESOLVE=1)
 #   scripts/demo.sh reset      reset fault injection, scale the services back to 1
 #   scripts/demo.sh status     status of each service, active alerts, latest emails
 #
@@ -15,6 +15,7 @@
 #                                              inhibits it (one page for the cause, not its symptoms)
 #   d  order readiness switched off         -> PodNotReady (warning) for order (and ServiceDown: its only
 #                                              pod receives no traffic)
+#   e  Keycloak scaled to 0 (Phase 6)       -> KeycloakDown (critical), email to on-call; sign-in fails
 #
 # Everything is reached with `kubectl port-forward` (fault-injection API, Alertmanager, Mailpit, Status
 # API): operator access that does not depend on the gateway, DNS, TLS or single sign-on.
@@ -234,6 +235,20 @@ scenario_d_reset() {
   faults order DELETE && info "order: faults reset"
 }
 
+scenario_e() {
+  step "e) Keycloak scaled to 0 -> KeycloakDown (critical)"
+  $KUBECTL -n identity patch keycloak keycloak --type merge -p '{"spec":{"instances":0}}' >/dev/null &&
+    info "identity/keycloak: instances=0"
+  wait_for "$FIRE_TIMEOUT" "KeycloakDown firing" firing KeycloakDown keycloak
+  wait_for 180 "email to on-call" email_firing KeycloakDown keycloak $ONCALL
+}
+
+scenario_e_reset() {
+  $KUBECTL -n identity patch keycloak keycloak --type merge -p '{"spec":{"instances":1}}' >/dev/null
+  $KUBECTL -n identity wait --for=condition=Ready keycloak/keycloak --timeout=600s >/dev/null &&
+    info "identity/keycloak: instances=1, ready"
+}
+
 wait_resolved() { # <alertname> <service> <to>...
   local name=$1 service=$2 to=$3
   wait_for "$RESOLVE_TIMEOUT" "$name for $service resolved" gone "$name" "$service"
@@ -264,8 +279,8 @@ for m in json.load(sys.stdin).get("messages", []):
 main() {
   local what=${1:-}
   case $what in
-    a | b | c | d | all | reset | status) ;;
-    *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    a | b | c | d | e | all | reset | status) ;;
+    *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
   esac
   start_port_forwards
   case $what in
@@ -295,6 +310,10 @@ main() {
       scenario_d; scenario_d_reset
       [[ $NO_RESOLVE == 1 ]] || wait_resolved PodNotReady order $TEAM
       ;;
+    e)
+      scenario_e; scenario_e_reset
+      [[ $NO_RESOLVE == 1 ]] || wait_resolved KeycloakDown keycloak $ONCALL
+      ;;
     all)
       scenario_a
       scenario_c       # payment still has 30 % errors: HighErrorRate is active when ServiceDown fires
@@ -303,12 +322,15 @@ main() {
       scenario_b_reset
       scenario_d
       scenario_d_reset
+      scenario_e
+      scenario_e_reset
       step "recovery: every alert resolves and a RESOLVED email follows"
       if [[ $NO_RESOLVE != 1 ]]; then
         wait_resolved ServiceDown payment $ONCALL
         wait_resolved PodNotReady order $TEAM
         wait_resolved HighLatencyP95 user $TEAM
         wait_resolved HighErrorRate payment $ONCALL
+        wait_resolved KeycloakDown keycloak $ONCALL
         for svc in "${SERVICES[@]}"; do wait_for 600 "status page: $svc UP" status_is "$svc" UP; done
       fi
       ;;

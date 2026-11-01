@@ -82,7 +82,8 @@ groups = [g for g in json.load(sys.stdin)["data"]["groups"] if g["name"].startsw
 alerts = sorted({r["name"] for g in groups for r in g["rules"] if r["type"] == "alerting"})
 bad = [r["name"] for g in groups for r in g["rules"] if r.get("health") != "ok"]
 want = {"ServiceDown", "HighErrorRate", "HighLatencyP95", "ErrorBudgetBurn", "PodNotReady",
-        "PodCrashLooping", "TelemetryPipelineDown", "Watchdog"}
+        "PodCrashLooping", "TelemetryPipelineDown", "Watchdog",
+        "KeycloakDown", "LoginFailureSpike", "TokenLatencyHigh"}
 missing = want - set(alerts)
 if missing or bad:
     print("missing", sorted(missing), "unhealthy", bad); sys.exit(1)

@@ -32,7 +32,7 @@
     {
       "title": "Status page",
       "type": "link",
-      "url": "http://status.localtest.me",
+      "url": "https://status.localtest.me",
       "targetBlank": true,
       "icon": "external link"
     }
@@ -439,6 +439,150 @@
           }
         }
       ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Sign-ins (Keycloak)",
+      "description": "Keycloak user events per realm (Phase 6): successful and failed browser logins and client-credentials token requests. Failed logins drive LoginFailureSpike.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum by (realm) (rate(keycloak_user_events_total{event=\"login\", error=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{realm}} logins",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum by (realm) (rate(keycloak_user_events_total{event=\"login\", error!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{realm}} failed logins",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum by (realm) (rate(keycloak_user_events_total{event=\"client_login\"}[$__rate_interval]))",
+          "legendFormat": "{{realm}} client credentials",
+          "refId": "C"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Rejected requests (401/403)",
+      "description": "Authentication and authorization failures, kept apart from 5xx (they never count as errors): missing or invalid tokens rejected by the gateway's JWT filter (401), requests denied by the gateway's group rules (403), and tokens rejected by the services themselves (shd_telemetry auth.failures).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum(rate(envoy_http_jwt_authn_denied[$__rate_interval]))",
+          "legendFormat": "gateway 401 (JWT)",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum(rate(envoy_http_rbac_denied[$__rate_interval]))",
+          "legendFormat": "gateway 403 (groups)",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "expr": "sum by (service_name, http_response_status_code) (rate(auth_failures_total[$__rate_interval]))",
+          "legendFormat": "{{service_name}} {{http_response_status_code}}",
+          "refId": "C"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     }
   ]
 }
