@@ -21,9 +21,9 @@ verifyEmail: false
 rememberMe: false
 bruteForceProtected: true
 failureFactor: 10
-accessTokenLifespan: 300
-ssoSessionIdleTimeout: 1800
-ssoSessionMaxLifespan: 36000
+accessTokenLifespan: 900
+ssoSessionIdleTimeout: 28800
+ssoSessionMaxLifespan: 86400
 # Every customer (also self-registered ones) may read and place orders.
 roles:
   realm:

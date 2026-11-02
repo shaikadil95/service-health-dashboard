@@ -9,9 +9,9 @@ loginWithEmailAllowed: true
 resetPasswordAllowed: false
 bruteForceProtected: true
 failureFactor: 10
-accessTokenLifespan: 300
-ssoSessionIdleTimeout: 3600
-ssoSessionMaxLifespan: 36000
+accessTokenLifespan: 900
+ssoSessionIdleTimeout: 28800
+ssoSessionMaxLifespan: 86400
 groups:
   - name: sre
   - name: dev
